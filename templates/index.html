@@ -811,20 +811,28 @@ function renderSuggestions(suggestions) {
     el.innerHTML = '<div class="empty"><div class="empty-icon">🤖</div><p>No suggestions available. Make sure you have read books and LLM configured.</p></div>';
     return;
   }
-  el.innerHTML = suggestions.map(s => `
+  el.innerHTML = suggestions.map(s => {
+    // LLM returns plain strings: "Title by Author" or just "Title"
+    let title = s, author = 'Unknown author';
+    const byMatch = s.match(/^(.+?)\s+by\s+(.+)$/i);
+    if (byMatch) {
+      title = byMatch[1].trim();
+      author = byMatch[2].trim();
+    }
+    return `
     <div class="book-card">
       <div class="book-cover">
-        ${s.cover_url ? `<img src="${s.cover_url}" alt="cover" loading="lazy">` : '<div class="book-cover-placeholder">📖</div>'}
+        <div class="book-cover-placeholder">📖</div>
       </div>
       <div class="book-info">
-        <div class="book-title" title="${escHtml(s.title)}">${escHtml(s.title)}</div>
-        <div class="book-author">${escHtml(s.author || 'Unknown author')}</div>
+        <div class="book-title" title="${escHtml(title)}">${escHtml(title)}</div>
+        <div class="book-author">${escHtml(author)}</div>
         <div class="book-meta">
-          <button class="btn btn-sm" onclick="addWantToRead(${s.id})">Add to Want to Read</button>
+          <span class="tag tag-want">Suggested</span>
         </div>
       </div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 
 function addWantToRead(bookId) {
