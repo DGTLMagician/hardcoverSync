@@ -569,6 +569,17 @@ def lookup_cwa_library(db_path: str) -> list[dict]:
             )
             tags = [r[0] for r in cur.fetchall()]
 
+            # Series
+            cur.execute(
+                "SELECT series.name, books_series_link.series_index FROM books_series_link "
+                "JOIN series ON series.id = books_series_link.series "
+                "WHERE books_series_link.book = ?",
+                (book_id,),
+            )
+            series_rows = cur.fetchall()
+            series_name = series_rows[0][0] if series_rows else None
+            series_index = series_rows[0][1] if series_rows else None
+
             status_id = _cwa_status_from_tags(tags)
             books.append(
                 {
@@ -578,6 +589,8 @@ def lookup_cwa_library(db_path: str) -> list[dict]:
                     "isbn13": _normalise_isbn(isbn13),
                     "identifiers": identifiers,
                     "tags": tags,
+                    "series": series_name,
+                    "series_index": series_index,
                     "status_id": status_id,
                     "status": CWA_STATUS_LABELS.get(status_id, "Unknown"),
                     "last_modified": row["last_modified"],
@@ -1250,6 +1263,98 @@ def get_hardcover_user_series(token: str, url: str) -> list[dict]:
     return list(series_map.values())
 
 
+def get_hardcover_series_id_for_book(book_id: int, token: str, url: str) -> Optional[int]:
+    """Fetch the primary series ID for a given Hardcover book."""
+    query = """
+    query GetBookSeries($bookId: Int!) {
+      books_by_pk(id: $bookId) {
+        series_books(limit: 1) {
+          series_id
+        }
+      }
+    }
+    """
+    data = _hc_query(query, {"bookId": book_id}, token=token, url=url)
+    if data and data.get("books_by_pk"):
+        series_books = data["books_by_pk"].get("series_books", [])
+        if series_books:
+            return series_books[0].get("series_id")
+    return None
+
+def download_missing_cwa_series_books(cwa_books: list[dict], config: dict, log_func) -> dict:
+    """Find series that exist in CWA, look them up on Hardcover, and trigger Shelfmark for missing books."""
+    result = {"series_checked": 0, "books_downloaded": 0, "errors": 0}
+    
+    # Group CWA books by series name
+    cwa_series_groups = {}
+    cwa_isbns = set(b.get("isbn13") for b in cwa_books if b.get("isbn13"))
+    cwa_hc_ids = set(int(b["identifiers"]["hardcover-id"]) for b in cwa_books if b.get("identifiers", {}).get("hardcover-id"))
+    
+    for book in cwa_books:
+        if book.get("series"):
+            if book["series"] not in cwa_series_groups:
+                cwa_series_groups[book["series"]] = []
+            cwa_series_groups[book["series"]].append(book)
+            
+    result["series_checked"] = len(cwa_series_groups)
+    
+    token = config["hardcover_token"]
+    url = config["hardcover_api_url"]
+    
+    for series_name, books_in_series in cwa_series_groups.items():
+        # Find a Hardcover series ID by checking the books we have
+        hc_series_id = None
+        for book in books_in_series:
+            hc_id = book.get("identifiers", {}).get("hardcover-id")
+            if hc_id:
+                try:
+                    hc_series_id = get_hardcover_series_id_for_book(int(hc_id), token, url)
+                    if hc_series_id:
+                        break
+                except ValueError:
+                    continue
+            else:
+                # Fallback: search Hardcover for the book to get its ID, then get the series
+                search_res = search_hardcover_books(book.get("isbn13") or book["title"], token, url)
+                if search_res and search_res[0].get("id"):
+                    hc_series_id = get_hardcover_series_id_for_book(search_res[0]["id"], token, url)
+                    if hc_series_id:
+                        break
+                        
+        if not hc_series_id:
+            log_func(f"Could not find Hardcover Series ID for CWA series '{series_name}'", "warning")
+            continue
+            
+        hc_series_books = get_hardcover_series_books(token, url, hc_series_id)
+        
+        for hc_book in hc_series_books:
+            # Check if we have this book in CWA
+            has_book = False
+            if hc_book.get("id") in cwa_hc_ids:
+                has_book = True
+            elif hc_book.get("isbn13") and hc_book.get("isbn13") in cwa_isbns:
+                has_book = True
+            elif find_book_in_cwa(cwa_books, hc_book.get("title"), hc_book.get("authors", []), hc_book.get("isbn13")):
+                has_book = True
+                
+            if not has_book and config.get("auto_download", False):
+                log_func(f"CWA Series '{series_name}' missing book: '{hc_book.get('title')}'. Triggering Shelfmark...")
+                dl_result = trigger_shelfmark_search(
+                    shelfmark_url=config["shelfmark_url"],
+                    api_key=config.get("shelfmark_api_key", ""),
+                    title=hc_book.get("title"),
+                    author=hc_book.get("authors")[0] if hc_book.get("authors") else "",
+                    isbn13=hc_book.get("isbn13"),
+                    preferred_format=config.get("shelfmark_format", "epub"),
+                    language=config.get("shelfmark_language", "en")
+                )
+                if dl_result.get("success"):
+                    result["books_downloaded"] += 1
+                    log_func(f"  ✓ {dl_result.get('message', 'Download requested')}")
+                else:
+                    result["errors"] += 1
+                    log_func(f"  ✗ {dl_result.get('message', 'Unknown Shelfmark error')}", "error")
+
 def fix_missing_series_books(token: str, url: str) -> dict:
     """Find series with missing books and add them to Want to Read."""
     result = {"checked_series": 0, "missing_books_added": 0, "errors": 0}
@@ -1671,7 +1776,13 @@ def run_sync(config: dict, state: dict, emit_log=None) -> dict:
         if config.get("auto_fix_series", True):
             log("Checking for missing books in series…")
             series_result = fix_missing_series_books(config["hardcover_token"], config["hardcover_api_url"])
-            log(f"Series check: {series_result['checked_series']} series checked, {series_result['missing_books_added']} missing books added")
+            log(f"Hardcover Series check: {series_result['checked_series']} series checked, {series_result['missing_books_added']} missing books added to Want To Read.")
+            
+            try:
+                cwa_series_res = download_missing_cwa_series_books(cwa_books, config, log)
+                log(f"CWA Series check: {cwa_series_res['series_checked']} series checked, {cwa_series_res['books_downloaded']} missing books triggered for download.")
+            except Exception as e:
+                log(f"Error checking CWA series completion: {e}", "error")
 
         # 4.5. Sync CWA Kobo Reading progress to Hardcover
         try:
