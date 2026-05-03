@@ -1016,9 +1016,24 @@ Do not include any other text or explanations.
 
 def search_hardcover_books(query: str, token: str, url: str) -> list[dict]:
     """Search for books on Hardcover using a query string."""
+    if not query or not query.strip():
+        return []
+
+    isbn_query = _normalise_isbn(query)
+    title_pattern = f"%{query.strip()}%"
+
     search_query = """
-    query SearchBooks($query: String!) {
-      search_books(query: $query, limit: 5) {
+    query SearchBooks($titlePattern: String!, $isbn: String) {
+      books(
+        limit: 5,
+        where: {
+          _or: [
+            {title: {_ilike: $titlePattern}}
+            {slug: {_ilike: $titlePattern}}
+            {editions: {isbn_13: {_eq: $isbn}}}
+          ]
+        }
+      ) {
         id
         title
         slug
@@ -1031,11 +1046,19 @@ def search_hardcover_books(query: str, token: str, url: str) -> list[dict]:
     }
     """
 
-    data = _hc_query(search_query, {"query": query}, token=token, url=url)
+    variables = {
+        "titlePattern": title_pattern,
+        "isbn": isbn_query,
+    }
+
+    data = _hc_query(search_query, variables, token=token, url=url)
     if not data:
         return []
 
-    books = data.get("search_books", [])
+    books = data.get("books", [])
+    if not isinstance(books, list):
+        return []
+
     results = []
     for book in books:
         authors = _extract_authors(book.get("cached_contributors", []))
