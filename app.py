@@ -291,21 +291,31 @@ def api_add_suggestion():
         return jsonify({"ok": False, "message": "Title required"}), 400
 
     config = get_config()
-    query = f"{title} {author}".strip() if author and author != "Unknown author" else title
-    results = search_hardcover_books(query, config["hardcover_token"], config["hardcover_api_url"])
+    token = config["hardcover_token"]
+    hc_url = config["hardcover_api_url"]
+
+    # Strategy 1: search by title only (most reliable for fuzzy match)
+    results = search_hardcover_books(title, token, hc_url)
+
+    # Strategy 2: if title alone found nothing and we have a real author, try combined
+    if not results and author and author.lower() not in ("unknown", "unknown author"):
+        combined = f"{title} {author}"
+        results = search_hardcover_books(combined, token, hc_url)
 
     if not results:
-        return jsonify({"ok": False, "message": f"Could not find '{title}' on Hardcover"}), 404
+        logger.warning("add_suggestion: no Hardcover results for title=%r author=%r", title, author)
+        return jsonify({"ok": False, "message": f"Could not find '{title}' on Hardcover. Try adding it manually."}), 404
 
     book_id = results[0].get("id")
+    found_title = results[0].get("title", title)
     if not book_id:
-        return jsonify({"ok": False, "message": "No ID in search result"}), 500
+        return jsonify({"ok": False, "message": "Search returned a result without an ID"}), 500
 
-    success = add_hardcover_book_status(book_id, status_id, config["hardcover_token"], config["hardcover_api_url"])
+    success = add_hardcover_book_status(book_id, status_id, token, hc_url)
     if success:
-        return jsonify({"ok": True, "book_id": book_id, "title": results[0].get("title", title)})
+        return jsonify({"ok": True, "book_id": book_id, "title": found_title})
     else:
-        return jsonify({"ok": False, "message": "Failed to add book to Hardcover"}), 500
+        return jsonify({"ok": False, "message": f"Found '{found_title}' but failed to update status on Hardcover"}), 500
 
 
 @app.route("/api/import_goodreads", methods=["POST"])

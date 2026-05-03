@@ -1139,67 +1139,93 @@ def generate_ai_suggestions(
 
 
 def search_hardcover_books(query: str, token: str, url: str) -> list[dict]:
-    """Search for books on Hardcover using a query string."""
+    """Search for books on Hardcover using a query string.
+    
+    Uses a 3-tier strategy:
+    1. Exact title match
+    2. Case-insensitive ILIKE on title (handles subtitle differences)
+    3. Author-aware ILIKE (title contains first words of query)
+    """
     if not query or not query.strip():
         return []
 
     isbn_query = _normalise_isbn(query)
-    search_query_str = query.strip()
+    title_query = query.strip()
 
-    search_query = """
-    query SearchBooks($query: String!, $isbn: String) {
+    def _parse_results(books_raw: list) -> list[dict]:
+        results = []
+        for book in (books_raw or []):
+            if not isinstance(book, dict):
+                continue
+            authors = _extract_authors(book.get("cached_contributors", []))
+            isbn13 = _best_isbn13(book.get("editions", []))
+            cover_url = _extract_cover_url(book.get("cached_image"))
+            results.append({
+                "id": book.get("id"),
+                "title": book.get("title"),
+                "slug": book.get("slug"),
+                "authors": authors,
+                "author": authors[0] if authors else "",
+                "isbn13": isbn13,
+                "cover_url": cover_url,
+            })
+        return results
+
+    # Tier 1: exact match or ISBN
+    q1 = """
+    query SearchBooksExact($title: String!, $isbn: String) {
       books(
         limit: 5,
         where: {
           _or: [
-            {title: {_eq: $query}}
-            {slug: {_eq: $query}}
+            {title: {_eq: $title}}
+            {slug: {_eq: $title}}
             {editions: {isbn_13: {_eq: $isbn}}}
           ]
         }
       ) {
-        id
-        title
-        slug
-        cached_contributors
-        cached_image
-        editions(limit: 1) {
-          isbn_13
-        }
+        id title slug cached_contributors cached_image
+        editions(limit: 1) { isbn_13 }
       }
     }
     """
+    data = _hc_query(q1, {"title": title_query, "isbn": isbn_query}, token=token, url=url)
+    results = _parse_results((data or {}).get("books", []))
+    if results:
+        return results
 
-    variables = {
-        "query": search_query_str,
-        "isbn": isbn_query,
+    # Tier 2: case-insensitive ILIKE — catches "Title: Subtitle" vs "Title"
+    q2 = """
+    query SearchBooksIlike($pattern: String!) {
+      books(
+        limit: 5,
+        order_by: {users_count: desc_nulls_last},
+        where: {title: {_ilike: $pattern}}
+      ) {
+        id title slug cached_contributors cached_image
+        editions(limit: 1) { isbn_13 }
+      }
     }
+    """
+    # Use first 4 significant words to avoid over-matching
+    words = [w for w in title_query.split() if len(w) > 2][:4]
+    pattern = "%" + " ".join(words) + "%" if words else f"%{title_query}%"
+    data = _hc_query(q2, {"pattern": pattern}, token=token, url=url)
+    results = _parse_results((data or {}).get("books", []))
+    if results:
+        return results
 
-    data = _hc_query(search_query, variables, token=token, url=url)
-    if not data:
-        return []
+    # Tier 3: broader fuzzy — just first keyword
+    if words:
+        pattern3 = f"%{words[0]}%"
+        data = _hc_query(q2, {"pattern": pattern3}, token=token, url=url)
+        results = _parse_results((data or {}).get("books", []))
+        if results:
+            return results
 
-    books = data.get("books", [])
-    if not isinstance(books, list):
-        return []
+    return []
 
-    results = []
-    for book in books:
-        authors = _extract_authors(book.get("cached_contributors", []))
-        isbn13 = _best_isbn13(book.get("editions", []))
-        cover_url = _extract_cover_url(book.get("cached_image"))
 
-        results.append({
-            "id": book.get("id"),
-            "title": book.get("title"),
-            "authors": authors,
-            "author": authors[0] if authors else "",
-            "isbn13": isbn13,
-            "cover_url": cover_url,
-            "slug": book.get("slug"),
-        })
-
-    return results
 
 
 def add_hardcover_want_to_read(book_id: int, token: str, url: str) -> bool:
