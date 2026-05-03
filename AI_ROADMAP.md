@@ -28,3 +28,29 @@ This document outlines strategic ideas for expanding `hardcoverSync` using the l
 **Execution**:
 - Use the LLM to analyze reading velocity (e.g., you finished Book 1 and 2 in a week).
 - Automatically boost priority or download Book 3 via Shelfmark if the LLM detects high engagement with a specific series, ensuring it is ready on the Kobo before the user even finishes the current book.
+
+## 5. Dynamic Reading Moods
+**Concept**: Curate the library based on "vibes" or seasons.
+**Execution**:
+- Analyze the user's recently finished books and Hardcover "currently reading" list.
+- Use the LLM to identify the "mood" (e.g., "Fast-paced Tech Noir" or "Atmospheric Gothic Horror").
+- Suggest a "Reading Season" theme and auto-curate a list of 5 books from the "Want to Read" shelf that fit this vibe, optionally pre-downloading them via Shelfmark.
+
+## 6. AI-Generated Personalized Challenges
+**Concept**: Create gamified reading goals that aren't just "number of books."
+**Execution**:
+- Ask the LLM to analyze the library and create a custom challenge, e.g., *"The Nebula Winners Sprint: Read 3 Hugo/Nebula award winners you own."*
+- Track progress automatically using the CWA/Hardcover sync state and display a custom progress bar in the dashboard.
+
+## 7. "Where You Left Off" Summaries
+**Concept**: Help readers get back into books they haven't touched in a while.
+**Execution**:
+- If a book has been in "Currently Reading" for >2 weeks without progress change on Kobo:
+- The system extracts the text surrounding the current progress point (from the EPUB file in CWA).
+- The LLM generates a brief "Recap of recent events" to refresh the user's memory when they next pick up their Kobo.
+
+## 8. Theme-Based Library Assistant
+**Concept**: Deep-dive into library metadata for complex queries.
+**Execution**:
+- The user asks: *"Find me something like Dune but with more focus on biology and less on politics."*
+- The AI performs a semantic search across book descriptions in the local library and Hardcover data to find the perfect niche match.

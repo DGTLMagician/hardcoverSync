@@ -400,6 +400,11 @@ input:checked + .toggle-slider::before { transform: translateX(18px); background
       <div class="stat-value" id="statInCwa">—</div>
       <div class="stat-sub">already in library</div>
     </div>
+    <div class="stat-card" style="--accent:var(--blue)">
+      <div class="stat-label">Synced to CWA</div>
+      <div class="stat-value" id="statSyncedCwa">—</div>
+      <div class="stat-sub">status updates</div>
+    </div>
     <div class="stat-card amber">
       <div class="stat-label">Downloaded</div>
       <div class="stat-value" id="statDownloaded">—</div>
@@ -743,6 +748,7 @@ function renderBooks(books) {
 function updateStats(r) {
   document.getElementById('statChecked').textContent    = r.books_checked ?? '—';
   document.getElementById('statInCwa').textContent      = r.books_in_cwa ?? '—';
+  document.getElementById('statSyncedCwa').textContent  = r.books_synced_to_cwa ?? '—';
   document.getElementById('statDownloaded').textContent = r.books_downloaded ?? '—';
   document.getElementById('statErrors').textContent     = r.errors ?? '—';
   if (r.started_at) {

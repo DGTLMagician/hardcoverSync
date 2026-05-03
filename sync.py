@@ -1586,6 +1586,7 @@ def run_sync(config: dict, state: dict, emit_log=None) -> dict:
         "books_in_cwa": 0,
         "books_downloaded": 0,
         "books_skipped": 0,
+        "books_synced_to_cwa": 0,
         "errors": 0,
     }
 
@@ -1618,10 +1619,13 @@ def run_sync(config: dict, state: dict, emit_log=None) -> dict:
         if not isinstance(status_ids, list):
             status_ids = [1, 2, 3]
 
+        # Always include status 3 (Read) so we can push it back to CWA,
+        # even if the user's sync_statuses config doesn't include it.
+        fetch_ids = sorted(set(status_ids) | {3})
         hc_books = fetch_hardcover_books(
             token=config["hardcover_token"],
             url=config["hardcover_api_url"],
-            status_ids=status_ids,
+            status_ids=fetch_ids,
         )
 
         if not hc_books:
@@ -1696,10 +1700,20 @@ def run_sync(config: dict, state: dict, emit_log=None) -> dict:
 
             read_wins = status_id == 3 or cwa_status_id == 3 or kobo_status_id == 3
 
-            if cwa_match and read_wins and cwa_status_id != 3:
-                updated = update_cwa_book_status(config["cwa_db_path"], cwa_match["id"], 3)
-                if updated:
-                    log(f"  → Marked '{title}' as Read in CWA")
+            # ── Hardcover → CWA status sync ──────────────────────────────
+            if cwa_match and status_id in (1, 2, 3) and cwa_status_id != status_id:
+                # Hardcover Read always wins
+                target_cwa = 3 if read_wins else status_id
+                if target_cwa != cwa_status_id:
+                    updated = update_cwa_book_status(config["cwa_db_path"], cwa_match["id"], target_cwa)
+                    if updated:
+                        result["books_synced_to_cwa"] += 1
+                        book_entry["cwa_status_id"] = target_cwa
+                        book_entry["cwa_status"] = CWA_STATUS_LABELS.get(target_cwa, "Unknown")
+                        log(f"  → CWA status updated to '{CWA_STATUS_LABELS.get(target_cwa)}' for '{title}'")
+                    else:
+                        result["errors"] += 1
+                        log(f"  ✗ Failed to update CWA status for '{title}'", "error")
 
             if read_wins and status_id != 3:
                 if update_hardcover_status(
