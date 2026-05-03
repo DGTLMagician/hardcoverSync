@@ -1064,8 +1064,8 @@ def generate_ai_suggestions(
     llm_api_key: str,
     llm_model: str,
     already_in_library: list[str] = None,
-) -> list[str]:
-    """Generate book recommendations using a local LLM based on read books."""
+) -> list[dict]:
+    """Generate book recommendations with justifications using a local LLM."""
     import re
 
     if not read_books:
@@ -1083,18 +1083,23 @@ def generate_ai_suggestions(
         )
 
     system_msg = (
-        "You are a book recommendation engine. "
-        "You MUST respond with ONLY a numbered list of book recommendations. "
-        "Each line must follow EXACTLY this format: 'Title by Author'. "
-        "Do NOT include any thinking, reasoning, explanation, preamble, or commentary. "
-        "Do NOT use <think> tags. Output ONLY the list, nothing else."
+        "You are a professional book recommendation engine. "
+        "You MUST respond with a list of exactly 8 book recommendations. "
+        "Each recommendation MUST follow this EXACT format on a single line:\n"
+        "TITLE by AUTHOR | JUSTIFICATION\n"
+        "Example: 'Project Hail Mary by Andy Weir | A gripping sci-fi story about a lone survivor on a space mission, perfect for fans of The Martian.'\n"
+        "CRITICAL RULES:\n"
+        "1. Do NOT include ANY text other than the list.\n"
+        "2. Do NOT include <think> tags or reasoning steps.\n"
+        "3. Do NOT include headers, intro, or outro text.\n"
+        "4. Use the pipe character '|' to separate the book from the justification."
     )
 
     user_msg = (
         f"The user has read these books:\n{book_list}\n"
         f"{exclusion_section}\n"
-        "Recommend 8 books they would enjoy that they have NOT read yet. "
-        "Reply with ONLY the list in the format 'Title by Author', one per line."
+        "Recommend 8 new books in the format: 'Title by Author | Justification'. "
+        "Ensure the justification explains why it matches their reading history."
     )
 
     try:
@@ -1109,28 +1114,37 @@ def generate_ai_suggestions(
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg},
             ],
-            max_tokens=1000,
+            max_tokens=1500,
             temperature=0.7,
         )
 
         raw = response.choices[0].message.content or ""
 
-        # Strip thinking model output: <think>...</think> blocks (DeepSeek, QwQ, etc.)
+        # Strip thinking model output: <think>...</think> blocks
         raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
 
-        # Parse lines: accept "1. Title by Author", "- Title by Author", "Title by Author"
         suggestions = []
         for line in raw.splitlines():
             line = line.strip()
-            if not line:
+            if not line or "|" not in line:
                 continue
-            # Strip leading bullets/numbers: "1.", "-", "*"
+            
+            # Strip leading bullets/numbers
             line = re.sub(r"^[\d]+[.)]\s*|^[-*]\s*", "", line).strip()
-            # Must contain " by " to be a valid entry
-            if " by " in line.lower() and len(line) > 5:
-                suggestions.append(line)
+            
+            parts = line.split("|", 1)
+            if len(parts) == 2:
+                sug_text = parts[0].strip()
+                just_text = parts[1].strip()
+                
+                # Validation: must have " by " in the suggestion part
+                if " by " in sug_text.lower():
+                    suggestions.append({
+                        "suggestion": sug_text,
+                        "justification": just_text
+                    })
 
-        return suggestions[:10]
+        return suggestions[:8]
 
     except Exception as e:
         logger.error("Failed to generate AI suggestions: %s", e)

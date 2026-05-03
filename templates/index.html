@@ -818,9 +818,11 @@ function renderSuggestions(suggestions) {
     return;
   }
   el.innerHTML = suggestions.map((s, i) => {
-    // LLM returns plain strings: "Title by Author" or just "Title"
-    let title = s, author = 'Unknown author';
-    const byMatch = s.match(/^(.+?)\s+by\s+(.+)$/i);
+    // s is now { suggestion: "Title by Author", justification: "..." }
+    const text = s.suggestion || '';
+    const justification = s.justification || '';
+    let title = text, author = 'Unknown author';
+    const byMatch = text.match(/^(.+?)\s+by\s+(.+)$/i);
     if (byMatch) {
       title = byMatch[1].trim();
       author = byMatch[2].trim();
@@ -834,7 +836,8 @@ function renderSuggestions(suggestions) {
       <div class="book-info">
         <div class="book-title" title="${escHtml(title)}">${escHtml(title)}</div>
         <div class="book-author">${escHtml(author)}</div>
-        <div class="book-meta" style="gap:6px;margin-top:8px">
+        ${justification ? `<div class="book-justification" style="font-size: 11px; color: var(--text-dim); margin-top: 6px; font-style: italic;">"${escHtml(justification)}"</div>` : ''}
+        <div class="book-meta" style="gap:6px;margin-top:10px">
           <button class="btn btn-sm" id="wtr-${idx}" onclick="addSuggestion(${idx}, '${escHtml(title).replace(/'/g,"\\'")}', '${escHtml(author).replace(/'/g,"\\'")}', 1)">📌 Want to Read</button>
           <button class="btn btn-sm" id="ar-${idx}" onclick="addSuggestion(${idx}, '${escHtml(title).replace(/'/g,"\\'")}', '${escHtml(author).replace(/'/g,"\\'")}', 3)">✓ Already Read</button>
         </div>
