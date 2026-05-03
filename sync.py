@@ -1065,7 +1065,7 @@ def generate_ai_suggestions(
     llm_model: str,
     already_in_library: list[str] = None,
 ) -> list[dict]:
-    """Generate book recommendations with justifications using a local LLM."""
+    """Generate book recommendations with justifications and hard-filtering of existing books."""
     import re
 
     if not read_books:
@@ -1075,31 +1075,41 @@ def generate_ai_suggestions(
         f"- {book['title']} by {book['author']}" for book in read_books[:20]
     )
 
+    # Normalize titles for matching (lowercase, alphanumeric only)
+    def normalize_title(t):
+        if not t: return ""
+        # Remove subtitles after colon or dash to match more broadly
+        t = re.split(r"[:\-]", t)[0]
+        return re.sub(r"[^a-z0-9]", "", t.lower())
+
+    excluded_normalized = set()
+    if already_in_library:
+        excluded_normalized = {normalize_title(t) for t in already_in_library}
+
     exclusion_section = ""
     if already_in_library:
-        exclude_titles = "\n".join(f"- {t}" for t in already_in_library[:50])
+        # Give the LLM some examples of what to avoid, but we'll hard-filter later too
+        exclude_titles = "\n".join(f"- {t}" for t in already_in_library[:40])
         exclusion_section = (
             f"\nDo NOT suggest any of these books (the user already has them):\n{exclude_titles}\n"
         )
 
     system_msg = (
         "You are a professional book recommendation engine. "
-        "You MUST respond with a list of exactly 8 book recommendations. "
+        "You MUST respond with a list of 12 book recommendations. "
         "Each recommendation MUST follow this EXACT format on a single line:\n"
         "TITLE by AUTHOR | JUSTIFICATION\n"
-        "Example: 'Project Hail Mary by Andy Weir | A gripping sci-fi story about a lone survivor on a space mission, perfect for fans of The Martian.'\n"
         "CRITICAL RULES:\n"
-        "1. Do NOT include ANY text other than the list.\n"
-        "2. Do NOT include <think> tags or reasoning steps.\n"
-        "3. Do NOT include headers, intro, or outro text.\n"
+        "1. Do NOT suggest books the user has already read.\n"
+        "2. Do NOT include ANY text other than the list.\n"
+        "3. Do NOT include <think> tags or reasoning steps.\n"
         "4. Use the pipe character '|' to separate the book from the justification."
     )
 
     user_msg = (
         f"The user has read these books:\n{book_list}\n"
         f"{exclusion_section}\n"
-        "Recommend 8 new books in the format: 'Title by Author | Justification'. "
-        "Ensure the justification explains why it matches their reading history."
+        "Recommend 12 new books in the format: 'Title by Author | Justification'. "
     )
 
     try:
@@ -1114,13 +1124,11 @@ def generate_ai_suggestions(
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg},
             ],
-            max_tokens=1500,
-            temperature=0.7,
+            max_tokens=2000,
+            temperature=0.8, # Slightly higher temperature for more variety
         )
 
         raw = response.choices[0].message.content or ""
-
-        # Strip thinking model output: <think>...</think> blocks
         raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
 
         suggestions = []
@@ -1129,16 +1137,22 @@ def generate_ai_suggestions(
             if not line or "|" not in line:
                 continue
             
-            # Strip leading bullets/numbers
             line = re.sub(r"^[\d]+[.)]\s*|^[-*]\s*", "", line).strip()
-            
             parts = line.split("|", 1)
             if len(parts) == 2:
                 sug_text = parts[0].strip()
                 just_text = parts[1].strip()
                 
-                # Validation: must have " by " in the suggestion part
                 if " by " in sug_text.lower():
+                    # --- HARD FILTERING IN PYTHON ---
+                    # Split title and author
+                    title_part = re.split(r"\s+by\s+", sug_text, flags=re.IGNORECASE)[0].strip()
+                    norm_sug = normalize_title(title_part)
+                    
+                    if norm_sug in excluded_normalized:
+                        logger.info("AI suggested already-read book, filtering out: %s", title_part)
+                        continue
+
                     suggestions.append({
                         "suggestion": sug_text,
                         "justification": just_text
