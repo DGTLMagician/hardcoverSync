@@ -269,26 +269,53 @@ def _extract_cover_url(cached_image: Any) -> Optional[str]:
 
 
 def _extract_authors(cached_contributors: Any) -> list[str]:
-    """Extract author names from Hardcover cached_contributors JSON."""
+    """Extract author names from Hardcover cached_contributors JSON.
+    
+    Hardcover's cached_contributors field is a JSONB column that can be:
+    - A JSON string: '[{"name": "...", "contribution": "Author"}, ...]'
+    - A Python list already parsed
+    - Entries may have contribution=None, "Author", "author", or other roles
+    """
     contributors = _json_maybe(cached_contributors, [])
+
+    # If it's a nested dict (e.g. {"author": [...]}) try to unwrap
+    if isinstance(contributors, dict):
+        for key in ("author", "authors", "contributors"):
+            if isinstance(contributors.get(key), list):
+                contributors = contributors[key]
+                break
+        else:
+            contributors = []
 
     if not isinstance(contributors, list):
         return []
 
     authors: list[str] = []
+    # Non-author roles to explicitly exclude
+    non_author_roles = {
+        "illustrator", "editor", "translator", "foreword", "introduction",
+        "narrator", "cover artist", "cover design", "photographer",
+    }
 
     for contributor in contributors:
         if not isinstance(contributor, dict):
+            # Could be a bare string
+            if isinstance(contributor, str) and contributor.strip():
+                authors.append(contributor.strip())
             continue
 
-        name = contributor.get("name")
-        contribution = contributor.get("contribution")
-
+        name = contributor.get("name") or contributor.get("full_name")
         if not name:
             continue
 
-        # Hardcover usually uses "Author", but keep it tolerant.
-        if contribution in (None, "Author", "author"):
+        contribution = (contributor.get("contribution") or "").lower().strip()
+        
+        # Include if contribution is empty/None, or is explicitly an author role
+        if contribution == "" or contribution in ("author", "write", "writer"):
+            authors.append(str(name).strip())
+        elif contribution not in non_author_roles:
+            # For unknown roles, include as author if no explicit authors found yet
+            # (we'll trim later if needed)
             authors.append(str(name).strip())
 
     return [a for a in authors if a]
@@ -1221,15 +1248,11 @@ def get_hardcover_user_series(token: str, url: str) -> list[dict]:
       me {
         user_books(where: {status_id: {_in: [1, 2, 3]}}) {
           book {
-            series_books {
+            book_series {
               series {
                 id
                 name
-                books_aggregate {
-                  aggregate {
-                    count
-                  }
-                }
+                books_count
               }
             }
           }
@@ -1246,16 +1269,16 @@ def get_hardcover_user_series(token: str, url: str) -> list[dict]:
     series_map = {}
 
     for ub in user_books:
-        book = ub.get("book", {})
-        for sb in book.get("series_books", []):
-            series = sb.get("series", {})
+        book = ub.get("book") or {}
+        for sb in book.get("book_series", []):
+            series = sb.get("series") or {}
             series_id = series.get("id")
             if series_id:
                 if series_id not in series_map:
                     series_map[series_id] = {
                         "id": series_id,
                         "name": series.get("name", ""),
-                        "total_books": series.get("books_aggregate", {}).get("aggregate", {}).get("count", 0),
+                        "total_books": series.get("books_count", 0),
                         "user_books": [],
                     }
                 series_map[series_id]["user_books"].append(book.get("id"))
@@ -1268,7 +1291,7 @@ def get_hardcover_series_id_for_book(book_id: int, token: str, url: str) -> Opti
     query = """
     query GetBookSeries($bookId: Int!) {
       books_by_pk(id: $bookId) {
-        series_books(limit: 1) {
+        book_series(limit: 1) {
           series_id
         }
       }
@@ -1276,9 +1299,9 @@ def get_hardcover_series_id_for_book(book_id: int, token: str, url: str) -> Opti
     """
     data = _hc_query(query, {"bookId": book_id}, token=token, url=url)
     if data and data.get("books_by_pk"):
-        series_books = data["books_by_pk"].get("series_books", [])
-        if series_books:
-            return series_books[0].get("series_id")
+        book_series = data["books_by_pk"].get("book_series", [])
+        if book_series:
+            return book_series[0].get("series_id")
     return None
 
 def download_missing_cwa_series_books(cwa_books: list[dict], config: dict, log_func) -> dict:
@@ -1354,6 +1377,8 @@ def download_missing_cwa_series_books(cwa_books: list[dict], config: dict, log_f
                 else:
                     result["errors"] += 1
                     log_func(f"  ✗ {dl_result.get('message', 'Unknown Shelfmark error')}", "error")
+
+    return result
 
 def fix_missing_series_books(token: str, url: str) -> dict:
     """Find series with missing books and add them to Want to Read."""

@@ -28,6 +28,13 @@ class CwaKoboClient:
     def get_library_sync(self) -> list[dict]:
         url = f"{self.base_url}/kobo/{self.token}/v1/library/sync"
         resp = self.session.get(url, timeout=30)
+        if resp.status_code == 401:
+            raise PermissionError(
+                f"CWA Kobo sync returned 401 Unauthorized. "
+                f"Check that CWA_USER in your .env is the Kobo Sync Token "
+                f"(found in CWA Admin > Users > <user> > Kobo Sync Token), "
+                f"not the CWA username/password."
+            )
         resp.raise_for_status()
         data = resp.json()
         
@@ -37,10 +44,6 @@ class CwaKoboClient:
             for k in ["sync", "books", "items"]:
                 if isinstance(data.get(k), list):
                     return data[k]
-            # Kobo sync often returns list of books under 'Deleted' and 'Updated' or similar.
-            # But CWA simple kobo endpoint might just return list. 
-            # If it's the official Kobo sync response, it has 'SyncItem' list inside.
-            # Let's check for typical Kobo sync response.
             if isinstance(data, list):
                 return data
         return [data] if isinstance(data, dict) else []
@@ -51,6 +54,8 @@ class CwaKoboClient:
             resp = self.session.get(url, timeout=30)
             if resp.status_code == 200:
                 return resp.json()
+            elif resp.status_code == 401:
+                logger.error(f"CWA Kobo 401 Unauthorized fetching state for {uuid}. Check CWA_USER token.")
         except requests.RequestException as e:
             logger.error(f"Failed to fetch state for {uuid}: {e}")
         return {}
