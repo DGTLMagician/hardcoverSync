@@ -197,13 +197,25 @@ def api_config_get():
 @app.route("/api/suggestions")
 def api_suggestions():
     config = get_config()
-    # Use Hardcover as source of truth — last_sync_books already has status_id and author
-    hc_books = state.get("last_sync_books", [])
-    read_books = [
-        {"title": b["title"], "author": b.get("author", "Unknown")}
-        for b in hc_books
-        if b.get("status_id") == 3
-    ]
+    # Always fetch read books directly from Hardcover (status_id=3 = Read),
+    # independent of what sync_statuses is configured.
+    from sync import fetch_hardcover_books, _extract_authors
+    hc_read_books = fetch_hardcover_books(
+        token=config["hardcover_token"],
+        url=config["hardcover_api_url"],
+        status_ids=[3],
+    )
+    read_books = []
+    for ub in hc_read_books:
+        book = ub.get("book") or {}
+        title = book.get("title")
+        authors = _extract_authors(book.get("cached_contributors"))
+        if title:
+            read_books.append({
+                "title": title,
+                "author": authors[0] if authors else "Unknown",
+            })
+
     suggestions = generate_ai_suggestions(
         read_books=read_books,
         llm_base_url=config.get("llm_base_url"),
