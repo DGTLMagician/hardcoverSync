@@ -121,7 +121,7 @@ def start_scheduler():
         trigger=IntervalTrigger(minutes=interval),
         id="sync_job",
         replace_existing=True,
-        next_run_time=None,  # Don't run immediately on startup
+        next_run_time=datetime.now(),
     )
     scheduler.start()
     logger.info("Scheduler started — sync every %d minute(s)", interval)
@@ -197,8 +197,14 @@ def api_config_get():
 @app.route("/api/suggestions")
 def api_suggestions():
     config = get_config()
-    # Get read books from CWA state
-    cwa_books = state.get("cwa_books", [])
+    # Get read books from CWA state or load them if state is empty (e.g. after restart)
+    cwa_books = state.get("cwa_books")
+    if not cwa_books:
+        from sync import lookup_cwa_library
+        cwa_books = lookup_cwa_library(config.get("cwa_db_path", ""))
+        state["cwa_books"] = cwa_books
+        
+    cwa_books = cwa_books or []
     
     # Format them so `generate_ai_suggestions` can use `book['author']`
     read_books = []
