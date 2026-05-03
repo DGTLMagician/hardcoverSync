@@ -1098,7 +1098,7 @@ def add_hardcover_want_to_read(book_id: int, token: str, url: str) -> bool:
     """Add a book to Hardcover as Want to Read."""
     mutation = """
     mutation AddUserBook($bookId: Int!) {
-      insert_user_book_one(object: {book_id: $bookId, status_id: 1}) {
+      insert_user_book(object: {book_id: $bookId, status_id: 1}) {
         id
       }
     }
@@ -1309,7 +1309,7 @@ def import_goodreads_to_hardcover(rss_url: str, token: str, url: str, status_id:
             # Add to user books with the specified status
             mutation = f"""
             mutation AddUserBook($bookId: Int!, $statusId: Int!) {{
-              insert_user_book_one(object: {{book_id: $bookId, status_id: $statusId}}) {{
+              insert_user_book(object: {{book_id: $bookId, status_id: $statusId}}) {{
                 id
               }}
             }}
