@@ -320,15 +320,28 @@ def _hc_query(query: str, variables: dict = None, token: str = None, url: str = 
         logger.error("Hardcover API URL is missing")
         return None
 
+    token_value = str(token).strip()
+    if token_value.lower().startswith("bearer "):
+        token_value = token_value.split(" ", 1)[1].strip()
+    if token_value.lower().startswith("token "):
+        token_value = token_value.split(" ", 1)[1].strip()
+
+    if not token_value:
+        logger.error("Hardcover token is empty after normalization")
+        return None
+
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "hardcover-sync/1.0",
+        "Authorization": f"Bearer {token_value}",
     }
 
     payload = {"query": query}
     if variables:
         payload["variables"] = variables
 
+    response = None
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=30)
         response.raise_for_status()
@@ -346,7 +359,10 @@ def _hc_query(query: str, variables: dict = None, token: str = None, url: str = 
         return data.get("data")
 
     except requests.RequestException as e:
-        logger.error("Hardcover request failed: %s", e)
+        if response is not None and response.status_code == 403:
+            logger.error("Hardcover request forbidden (%s): %s", response.status_code, response.text[:300])
+        else:
+            logger.error("Hardcover request failed: %s", e)
         return None
 
 

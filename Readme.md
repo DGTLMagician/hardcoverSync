@@ -40,6 +40,8 @@ SHELFMARK_URL=http://localhost:8084
 
 Get your Hardcover token at: https://hardcover.app/account/api
 
+> Note: `HARDCOVER_API_TOKEN` should be the raw token value only, not a full `Bearer ...` header string.
+
 ### 2a — Run with Python (no Docker)
 
 ```bash
