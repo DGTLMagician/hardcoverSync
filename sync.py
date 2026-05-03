@@ -1058,7 +1058,13 @@ def trigger_shelfmark_search(
 # AI Suggestions
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_ai_suggestions(read_books: list[dict], llm_base_url: str, llm_api_key: str, llm_model: str) -> list[str]:
+def generate_ai_suggestions(
+    read_books: list[dict],
+    llm_base_url: str,
+    llm_api_key: str,
+    llm_model: str,
+    already_in_library: list[str] = None,
+) -> list[str]:
     """Generate book recommendations using a local LLM based on read books."""
     import re
 
@@ -1069,6 +1075,13 @@ def generate_ai_suggestions(read_books: list[dict], llm_base_url: str, llm_api_k
         f"- {book['title']} by {book['author']}" for book in read_books[:20]
     )
 
+    exclusion_section = ""
+    if already_in_library:
+        exclude_titles = "\n".join(f"- {t}" for t in already_in_library[:50])
+        exclusion_section = (
+            f"\nDo NOT suggest any of these books (the user already has them):\n{exclude_titles}\n"
+        )
+
     system_msg = (
         "You are a book recommendation engine. "
         "You MUST respond with ONLY a numbered list of book recommendations. "
@@ -1078,8 +1091,9 @@ def generate_ai_suggestions(read_books: list[dict], llm_base_url: str, llm_api_k
     )
 
     user_msg = (
-        f"The user has read these books:\n{book_list}\n\n"
-        "Recommend 8 books they would enjoy. "
+        f"The user has read these books:\n{book_list}\n"
+        f"{exclusion_section}\n"
+        "Recommend 8 books they would enjoy that they have NOT read yet. "
         "Reply with ONLY the list in the format 'Title by Author', one per line."
     )
 

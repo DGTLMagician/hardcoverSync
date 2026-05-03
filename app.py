@@ -231,27 +231,30 @@ def api_config_get():
 @app.route("/api/suggestions")
 def api_suggestions():
     config = get_config()
-    # Always fetch read books directly from Hardcover (status_id=3 = Read),
-    # independent of what sync_statuses is configured.
     from sync import fetch_hardcover_books, _extract_authors
-    hc_read_books = fetch_hardcover_books(
+
+    # Fetch all books already in the user's Hardcover library (any status)
+    all_hc_books = fetch_hardcover_books(
         token=config["hardcover_token"],
         url=config["hardcover_api_url"],
-        status_ids=[3],
+        status_ids=[1, 2, 3, 5],
     )
+
     read_books = []
-    for ub in hc_read_books:
+    all_titles = []  # everything already in their library
+    for ub in all_hc_books:
         book = ub.get("book") or {}
         title = book.get("title")
         authors = _extract_authors(book.get("cached_contributors"))
+        author = authors[0] if authors else "Unknown"
         if title:
-            read_books.append({
-                "title": title,
-                "author": authors[0] if authors else "Unknown",
-            })
+            all_titles.append(title)
+            if ub.get("status_id") == 3:
+                read_books.append({"title": title, "author": author})
 
     suggestions = generate_ai_suggestions(
         read_books=read_books,
+        already_in_library=all_titles,
         llm_base_url=config.get("llm_base_url"),
         llm_api_key=config.get("llm_api_key"),
         llm_model=config.get("llm_model")
@@ -273,6 +276,36 @@ def api_add_want_to_read():
         return jsonify({"ok": True})
     else:
         return jsonify({"ok": False, "message": "Failed to add book"}), 500
+
+
+@app.route("/api/add_suggestion", methods=["POST"])
+def api_add_suggestion():
+    """Search Hardcover for a suggested book (by title+author) and add it with given status."""
+    from sync import search_hardcover_books, add_hardcover_book_status
+    data = request.json or {}
+    title = data.get("title", "").strip()
+    author = data.get("author", "").strip()
+    status_id = int(data.get("status_id", 1))  # default: Want to Read
+
+    if not title:
+        return jsonify({"ok": False, "message": "Title required"}), 400
+
+    config = get_config()
+    query = f"{title} {author}".strip() if author and author != "Unknown author" else title
+    results = search_hardcover_books(query, config["hardcover_token"], config["hardcover_api_url"])
+
+    if not results:
+        return jsonify({"ok": False, "message": f"Could not find '{title}' on Hardcover"}), 404
+
+    book_id = results[0].get("id")
+    if not book_id:
+        return jsonify({"ok": False, "message": "No ID in search result"}), 500
+
+    success = add_hardcover_book_status(book_id, status_id, config["hardcover_token"], config["hardcover_api_url"])
+    if success:
+        return jsonify({"ok": True, "book_id": book_id, "title": results[0].get("title", title)})
+    else:
+        return jsonify({"ok": False, "message": "Failed to add book to Hardcover"}), 500
 
 
 @app.route("/api/import_goodreads", methods=["POST"])

@@ -811,7 +811,7 @@ function renderSuggestions(suggestions) {
     el.innerHTML = '<div class="empty"><div class="empty-icon">🤖</div><p>No suggestions available. Make sure you have read books and LLM configured.</p></div>';
     return;
   }
-  el.innerHTML = suggestions.map(s => {
+  el.innerHTML = suggestions.map((s, i) => {
     // LLM returns plain strings: "Title by Author" or just "Title"
     let title = s, author = 'Unknown author';
     const byMatch = s.match(/^(.+?)\s+by\s+(.+)$/i);
@@ -819,20 +819,56 @@ function renderSuggestions(suggestions) {
       title = byMatch[1].trim();
       author = byMatch[2].trim();
     }
+    const idx = i;
     return `
-    <div class="book-card">
+    <div class="book-card" id="sug-${idx}">
       <div class="book-cover">
         <div class="book-cover-placeholder">📖</div>
       </div>
       <div class="book-info">
         <div class="book-title" title="${escHtml(title)}">${escHtml(title)}</div>
         <div class="book-author">${escHtml(author)}</div>
-        <div class="book-meta">
-          <span class="tag tag-want">Suggested</span>
+        <div class="book-meta" style="gap:6px;margin-top:8px">
+          <button class="btn btn-sm" id="wtr-${idx}" onclick="addSuggestion(${idx}, '${escHtml(title).replace(/'/g,"\\'")}', '${escHtml(author).replace(/'/g,"\\'")}', 1)">📌 Want to Read</button>
+          <button class="btn btn-sm" id="ar-${idx}" onclick="addSuggestion(${idx}, '${escHtml(title).replace(/'/g,"\\'")}', '${escHtml(author).replace(/'/g,"\\'")}', 3)">✓ Already Read</button>
         </div>
       </div>
     </div>`;
   }).join('');
+}
+
+function addSuggestion(idx, title, author, statusId) {
+  const wtrBtn = document.getElementById('wtr-' + idx);
+  const arBtn  = document.getElementById('ar-' + idx);
+  if (wtrBtn) wtrBtn.disabled = true;
+  if (arBtn)  arBtn.disabled  = true;
+
+  fetch('/api/add_suggestion', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, author, status_id: statusId }),
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      const label = statusId === 3 ? '✓ Added as Read' : '✓ Added to Want to Read';
+      const card = document.getElementById('sug-' + idx);
+      if (card) {
+        const meta = card.querySelector('.book-meta');
+        if (meta) meta.innerHTML = `<span class="tag tag-${statusId === 3 ? 'read' : 'want'}">${label}</span>`;
+      }
+      toast(label + ': ' + (d.title || title), 'success');
+    } else {
+      if (wtrBtn) wtrBtn.disabled = false;
+      if (arBtn)  arBtn.disabled  = false;
+      toast(d.message || 'Failed to add book', 'error');
+    }
+  })
+  .catch(() => {
+    if (wtrBtn) wtrBtn.disabled = false;
+    if (arBtn)  arBtn.disabled  = false;
+    toast('Request failed', 'error');
+  });
 }
 
 function addWantToRead(bookId) {
