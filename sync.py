@@ -1196,7 +1196,12 @@ def fix_missing_series_books(token: str, url: str) -> dict:
 def parse_goodreads_rss(rss_url: str) -> list[dict]:
     """Parse Goodreads RSS feed and extract book information."""
     try:
-        response = requests.get(rss_url, timeout=30)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Accept": "application/rss+xml, application/xml, text/xml, */*;q=0.1",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        response = requests.get(rss_url, timeout=30, headers=headers)
         response.raise_for_status()
 
         root = ET.fromstring(response.content)
