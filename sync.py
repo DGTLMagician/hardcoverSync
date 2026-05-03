@@ -13,6 +13,7 @@ from typing import Optional, Any
 from openai import OpenAI
 import xml.etree.ElementTree as ET
 from urllib.parse import urlparse
+from cwa_kobo_sync import run_cwa_kobo_sync
 
 logger = logging.getLogger("hardcover_sync")
 
@@ -631,6 +632,44 @@ def find_book_in_cwa(
     return None
 
 
+def find_book_in_hc(
+    hc_books: list[dict],
+    title: str,
+    authors: list[str],
+    isbn13: str = None,
+) -> Optional[dict]:
+    """Search Hardcover user library for a book by ISBN first, then title+author fuzzy match."""
+    isbn13_norm = _normalise_isbn(isbn13)
+
+    # ISBN match is most reliable.
+    if isbn13_norm:
+        for user_book in hc_books:
+            book = user_book.get("book") or {}
+            hc_isbn = _best_isbn13(book.get("editions", []))
+            if hc_isbn and hc_isbn == isbn13_norm:
+                return user_book
+
+    # Title + author fuzzy match.
+    norm_title = _normalise(title)
+    norm_authors = [_normalise(a) for a in (authors or []) if a]
+
+    for user_book in hc_books:
+        book = user_book.get("book") or {}
+        if _normalise(book.get("title", "")) != norm_title:
+            continue
+
+        if not norm_authors:
+            return user_book
+
+        hc_authors = [_normalise(a) for a in _extract_authors(book.get("cached_contributors", []))]
+        joined_hc_authors = " ".join(hc_authors)
+
+        if any(author in joined_hc_authors for author in norm_authors if author):
+            return user_book
+
+    return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Shelfmark downloader trigger
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1107,6 +1146,19 @@ def add_hardcover_want_to_read(book_id: int, token: str, url: str) -> bool:
     return data is not None
 
 
+def add_hardcover_book_status(book_id: int, status_id: int, token: str, url: str) -> bool:
+    """Add a book to Hardcover with a specific status."""
+    mutation = """
+    mutation AddUserBook($bookId: Int!, $statusId: Int!) {
+      insert_user_book(object: {book_id: $bookId, status_id: $statusId}) {
+        id
+      }
+    }
+    """
+    data = _hc_query(mutation, {"bookId": book_id, "statusId": status_id}, token=token, url=url)
+    return data is not None
+
+
 def get_hardcover_series_books(token: str, url: str, series_id: int) -> list[dict]:
     """Get all books in a series from Hardcover."""
     query = """
@@ -1554,11 +1606,81 @@ def run_sync(config: dict, state: dict, emit_log=None) -> dict:
                     else:
                         result["books_skipped"] += 1
 
+        if kobo_books:
+            log("Syncing Kobo read books into Hardcover where missing…")
+            for kobo_book in kobo_books:
+                if not find_book_in_hc(hc_books, kobo_book["title"], kobo_book["authors"], kobo_book["isbn13"]):
+                    log(f"✗ Kobo read book '{kobo_book['title']}' is missing in Hardcover", "warning")
+                    search_res = search_hardcover_books(
+                        kobo_book["isbn13"] or kobo_book["title"],
+                        config["hardcover_token"],
+                        config["hardcover_api_url"]
+                    )
+                    if search_res:
+                        hc_id = search_res[0].get("id")
+                        if hc_id:
+                            log(f"  → Found on Hardcover, adding as Read")
+                            added = add_hardcover_book_status(
+                                book_id=hc_id,
+                                status_id=3,
+                                token=config["hardcover_token"],
+                                url=config["hardcover_api_url"]
+                            )
+                            if added:
+                                log(f"  ✓ Added '{kobo_book['title']}' to Hardcover")
+                                # Add a dummy entry so we don't re-add if it's also in CWA
+                                hc_books.append({"book": {"title": kobo_book["title"], "id": hc_id}, "status_id": 3})
+                            else:
+                                log(f"  ✗ Failed to add '{kobo_book['title']}' to Hardcover", "error")
+                                result["errors"] += 1
+                    else:
+                        log(f"  ✗ Could not find '{kobo_book['title']}' on Hardcover search", "warning")
+
+        log("Syncing CWA books into Hardcover where missing…")
+        for cwa_book in cwa_books:
+            if not find_book_in_hc(hc_books, cwa_book["title"], cwa_book["authors"], cwa_book["isbn13"]):
+                target_status = cwa_book.get("status_id", 0)
+                if target_status not in [1, 2, 3, 5]:
+                    target_status = 1  # Default to Want to Read if unknown
+                
+                log(f"✗ CWA book '{cwa_book['title']}' is missing in Hardcover", "warning")
+                search_res = search_hardcover_books(
+                    cwa_book["isbn13"] or cwa_book["title"],
+                    config["hardcover_token"],
+                    config["hardcover_api_url"]
+                )
+                if search_res:
+                    hc_id = search_res[0].get("id")
+                    if hc_id:
+                        log(f"  → Found on Hardcover, adding with status {HARDCOVER_STATUS_LABELS.get(target_status, target_status)}")
+                        added = add_hardcover_book_status(
+                            book_id=hc_id,
+                            status_id=target_status,
+                            token=config["hardcover_token"],
+                            url=config["hardcover_api_url"]
+                        )
+                        if added:
+                            log(f"  ✓ Added '{cwa_book['title']}' to Hardcover")
+                            hc_books.append({"book": {"title": cwa_book["title"], "id": hc_id}, "status_id": target_status})
+                        else:
+                            log(f"  ✗ Failed to add '{cwa_book['title']}' to Hardcover", "error")
+                            result["errors"] += 1
+                else:
+                    log(f"  ✗ Could not find '{cwa_book['title']}' on Hardcover search", "warning")
+
         # 4. Fix missing series books
         if config.get("auto_fix_series", True):
             log("Checking for missing books in series…")
             series_result = fix_missing_series_books(config["hardcover_token"], config["hardcover_api_url"])
             log(f"Series check: {series_result['checked_series']} series checked, {series_result['missing_books_added']} missing books added")
+
+        # 4.5. Sync CWA Kobo Reading progress to Hardcover
+        try:
+            log("Running CWA Kobo reading progress sync to Hardcover...")
+            run_cwa_kobo_sync(config, log_func=log)
+        except Exception as e:
+            log(f"Error during CWA Kobo sync: {e}", "error")
+
 
         # 5. Update state
         state["last_sync_books"] = sync_results

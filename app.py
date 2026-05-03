@@ -12,7 +12,7 @@ from flask_socketio import SocketIO, emit
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from sync import run_sync, HARDCOVER_STATUS_LABELS
+from sync import run_sync, HARDCOVER_STATUS_LABELS, generate_ai_suggestions
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Bootstrap
@@ -60,6 +60,7 @@ def get_config() -> dict:
         "hardcover_api_url": os.getenv("HARDCOVER_API_URL", "https://api.hardcover.app/v1/graphql"),
         "cwa_db_path": os.getenv("CWA_DB_PATH", "/books/metadata.db"),
         "cwa_url": os.getenv("CWA_URL", "http://localhost:8083"),
+        "cwa_user": os.getenv("CWA_USER", ""),
         "shelfmark_url": os.getenv("SHELFMARK_URL", "http://localhost:8084"),
         "shelfmark_api_key": os.getenv("SHELFMARK_API_KEY", ""),
         "shelfmark_format": os.getenv("SHELFMARK_FORMAT", "epub"),
@@ -198,7 +199,12 @@ def api_suggestions():
     config = get_config()
     # Get read books from state
     read_books = [book for book in state.get("last_sync_books", []) if book.get("status_id") == 3]
-    suggestions = get_ai_suggestions(read_books, config)
+    suggestions = generate_ai_suggestions(
+        read_books=read_books,
+        llm_base_url=config.get("llm_base_url"),
+        llm_api_key=config.get("llm_api_key"),
+        llm_model=config.get("llm_model")
+    )
     return jsonify(suggestions)
 
 
