@@ -1036,16 +1036,16 @@ def search_hardcover_books(query: str, token: str, url: str) -> list[dict]:
         return []
 
     isbn_query = _normalise_isbn(query)
-    title_pattern = f"%{query.strip()}%"
+    search_query_str = query.strip()
 
     search_query = """
-    query SearchBooks($titlePattern: String!, $isbn: String) {
+    query SearchBooks($query: String!, $isbn: String) {
       books(
         limit: 5,
         where: {
           _or: [
-            {title: {_ilike: $titlePattern}}
-            {slug: {_ilike: $titlePattern}}
+            {title: {_eq: $query}}
+            {slug: {_eq: $query}}
             {editions: {isbn_13: {_eq: $isbn}}}
           ]
         }
@@ -1063,7 +1063,7 @@ def search_hardcover_books(query: str, token: str, url: str) -> list[dict]:
     """
 
     variables = {
-        "titlePattern": title_pattern,
+        "query": search_query_str,
         "isbn": isbn_query,
     }
 
@@ -1232,6 +1232,18 @@ def fix_missing_series_books(token: str, url: str) -> dict:
     return result
 
 
+def parse_goodreads_title(full_title: str) -> str:
+    """Parse Goodreads RSS title to extract clean book title."""
+    # Remove everything after : or |
+    title = full_title.split(':')[0].split('|')[0].strip()
+    # If ends with ), remove the last parentheses block
+    if title.endswith(')'):
+        paren_start = title.rfind('(')
+        if paren_start > 0:
+            title = title[:paren_start].strip()
+    return title
+
+
 def parse_goodreads_rss(rss_url: str) -> list[dict]:
     """Parse Goodreads RSS feed and extract book information."""
     try:
@@ -1256,7 +1268,7 @@ def parse_goodreads_rss(rss_url: str) -> list[dict]:
 
             if title_elem is not None and title_elem.text:
                 book = {
-                    "title": title_elem.text.strip(),
+                    "title": parse_goodreads_title(title_elem.text.strip()),
                     "author": author_elem.text.strip() if author_elem is not None and author_elem.text else "",
                     "isbn13": isbn_elem.text.strip() if isbn_elem is not None and isbn_elem.text else "",
                     "rating": int(rating_elem.text) if rating_elem is not None and rating_elem.text else None,
@@ -1280,8 +1292,11 @@ def import_goodreads_to_hardcover(rss_url: str, token: str, url: str, status_id:
         result["books_found"] = len(books)
 
         for book in books:
-            # Search for the book on Hardcover
-            search_results = search_hardcover_books(f"{book['title']} {book['author']}", token, url)
+            # Search for the book on Hardcover by title or ISBN
+            search_query = book['title']
+            if book['isbn13']:
+                search_query = book['isbn13']  # Prefer ISBN if available
+            search_results = search_hardcover_books(search_query, token, url)
 
             if not search_results:
                 logger.warning(f"Book not found on Hardcover: {book['title']} by {book['author']}")
