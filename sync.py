@@ -13,7 +13,6 @@ from typing import Optional, Any
 from openai import OpenAI
 import xml.etree.ElementTree as ET
 from urllib.parse import urlparse
-from cwa_kobo_sync import run_cwa_kobo_sync
 
 logger = logging.getLogger("hardcover_sync")
 
@@ -1676,6 +1675,7 @@ def run_sync(config: dict, state: dict, emit_log=None) -> dict:
 
         # 4.5. Sync CWA Kobo Reading progress to Hardcover
         try:
+            from cwa_kobo_sync import run_cwa_kobo_sync
             log("Running CWA Kobo reading progress sync to Hardcover...")
             run_cwa_kobo_sync(config, log_func=log)
         except Exception as e:
