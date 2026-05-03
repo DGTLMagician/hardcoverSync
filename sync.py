@@ -792,68 +792,85 @@ def trigger_shelfmark_search(
     if login_error:
         return {"success": False, "message": login_error}
 
-    search_query = isbn13 if isbn13 else f"{title} {author}".strip()
-    if not search_query:
+    search_terms = []
+    title_author = f"{title} {author}".strip()
+    if isbn13:
+        search_terms.append(isbn13)
+    if title_author and title_author not in search_terms:
+        search_terms.append(title_author)
+    if title and title not in search_terms:
+        search_terms.append(title)
+
+    if not search_terms:
         return {"success": False, "message": "No title/author/ISBN available for Shelfmark search"}
 
     try:
         releases_url = f"{api_base}/releases"
+        releases = []
+        last_query = None
 
-        params = {
-            "source": release_source or "direct_download",
-            "query": search_query,
-            "content_type": "ebook",
-        }
-
-        # Shelfmark supports language filters on release searches in the frontend flow.
-        if language:
-            params["languages"] = language
-
-        response = session.get(
-            releases_url,
-            params=params,
-            timeout=120,
-        )
-
-        if response.status_code == 401:
-            return {
-                "success": False,
-                "message": (
-                    "Shelfmark requires authentication. Set shelfmark_username "
-                    "and shelfmark_password in your config, or disable auth for this integration."
-                ),
+        for query_text in search_terms:
+            last_query = query_text
+            const_params = {
+                "source": release_source or "direct_download",
+                "query": query_text,
+                "content_type": "ebook",
             }
+            if language:
+                const_params["languages"] = language
 
-        if response.status_code == 404:
-            return {
-                "success": False,
-                "message": (
-                    f"Shelfmark releases endpoint not found at {releases_url}. "
-                    "Check whether shelfmark_url points to the Shelfmark root URL, not the frontend path."
-                ),
-            }
+            response = session.get(
+                releases_url,
+                params=const_params,
+                timeout=120,
+            )
 
-        response.raise_for_status()
+            if response.status_code == 401:
+                return {
+                    "success": False,
+                    "message": (
+                        "Shelfmark requires authentication. Set shelfmark_username "
+                        "and shelfmark_password in your config, or disable auth for this integration."
+                    ),
+                }
 
-        try:
-            data = response.json()
-        except ValueError:
-            return {
-                "success": False,
-                "message": f"Shelfmark returned non-JSON release search response: {response.text[:300]}",
-            }
+            if response.status_code == 404:
+                return {
+                    "success": False,
+                    "message": (
+                        f"Shelfmark releases endpoint not found at {releases_url}. "
+                        "Check whether shelfmark_url points to the Shelfmark root URL, not the frontend path."
+                    ),
+                }
 
-        releases = data.get("releases", []) if isinstance(data, dict) else []
-        if not isinstance(releases, list):
-            return {
-                "success": False,
-                "message": f"Unexpected Shelfmark releases response shape: {type(releases).__name__}",
-            }
+            response.raise_for_status()
+
+            try:
+                data = response.json()
+            except ValueError:
+                return {
+                    "success": False,
+                    "message": f"Shelfmark returned non-JSON release search response: {response.text[:300]}",
+                }
+
+            releases = data.get("releases", []) if isinstance(data, dict) else []
+            if not isinstance(releases, list):
+                return {
+                    "success": False,
+                    "message": f"Unexpected Shelfmark releases response shape: {type(releases).__name__}",
+                }
+
+            if releases:
+                search_query = query_text
+                break
+
+            if query_text != search_terms[-1]:
+                logger.info("Shelfmark search returned no results for query '%s'; retrying with next term", query_text)
 
         if not releases:
             return {
                 "success": False,
-                "message": f"No Shelfmark releases found for query '{search_query}'",
+                "message": f"No Shelfmark releases found for queries: {search_terms!r}",
             }
 
         release = _shelfmark_pick_release(
