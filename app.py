@@ -64,8 +64,16 @@ def get_config() -> dict:
         "shelfmark_api_key": os.getenv("SHELFMARK_API_KEY", ""),
         "shelfmark_format": os.getenv("SHELFMARK_FORMAT", "epub"),
         "shelfmark_language": os.getenv("SHELFMARK_LANGUAGE", "en"),
+        "kobo_db_path": os.getenv("KOBO_DB_PATH", ""),
+        "kobo_api_url": os.getenv("KOBO_API_URL", ""),
+        "kobo_email": os.getenv("KOBO_EMAIL", ""),
+        "kobo_password": os.getenv("KOBO_PASSWORD", ""),
+        "llm_base_url": os.getenv("LLM_BASE_URL", "http://localhost:11434/v1"),
+        "llm_api_key": os.getenv("LLM_API_KEY", ""),
+        "llm_model": os.getenv("LLM_MODEL", "llama3.2:3b"),
         "sync_statuses": status_ids,
         "auto_download": os.getenv("AUTO_DOWNLOAD", "true").lower() == "true",
+        "auto_fix_series": os.getenv("AUTO_FIX_SERIES", "true").lower() == "true",
         "sync_reading_progress": os.getenv("SYNC_READING_PROGRESS", "true").lower() == "true",
     }
 
@@ -185,69 +193,52 @@ def api_config_get():
     return jsonify(safe)
 
 
-@app.route("/api/config", methods=["POST"])
-def api_config_save():
-    """Write .env overrides from the UI config panel."""
+@app.route("/api/suggestions")
+def api_suggestions():
+    config = get_config()
+    # Get read books from state
+    read_books = [book for book in state.get("last_sync_books", []) if book.get("status_id") == 3]
+    suggestions = get_ai_suggestions(read_books, config)
+    return jsonify(suggestions)
+
+
+@app.route("/api/add_want_to_read", methods=["POST"])
+def api_add_want_to_read():
+    from sync import add_hardcover_want_to_read
     data = request.json or {}
-    env_path = Path(".env")
-    # Read existing lines
-    lines = env_path.read_text().splitlines() if env_path.exists() else []
+    book_id = data.get("book_id")
+    if not book_id:
+        return jsonify({"ok": False, "message": "Book ID required"}), 400
 
-    mapping = {
-        "hardcover_api_url": "HARDCOVER_API_URL",
-        "hardcover_token": "HARDCOVER_API_TOKEN",
-        "cwa_db_path": "CWA_DB_PATH",
-        "cwa_url": "CWA_URL",
-        "shelfmark_url": "SHELFMARK_URL",
-        "shelfmark_api_key": "SHELFMARK_API_KEY",
-        "shelfmark_format": "SHELFMARK_FORMAT",
-        "shelfmark_language": "SHELFMARK_LANGUAGE",
-        "sync_statuses": "SYNC_STATUSES",
-        "sync_interval": "SYNC_INTERVAL_MINUTES",
-        "auto_download": "AUTO_DOWNLOAD",
-        "sync_reading_progress": "SYNC_READING_PROGRESS",
-    }
+    config = get_config()
+    success = add_hardcover_want_to_read(int(book_id), config["hardcover_token"], config["hardcover_api_url"])
+    if success:
+        return jsonify({"ok": True})
+    else:
+        return jsonify({"ok": False, "message": "Failed to add book"}), 500
 
-    updates = {}
-    for field, env_key in mapping.items():
-        if field in data:
-            val = data[field]
-            if isinstance(val, bool):
-                val = "true" if val else "false"
-            elif isinstance(val, list):
-                val = ",".join(str(v) for v in val)
-            updates[env_key] = str(val)
 
-    # Merge: update existing lines, append new ones
-    new_lines = []
-    updated_keys = set()
-    for line in lines:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#"):
-            key = stripped.split("=", 1)[0].strip()
-            if key in updates:
-                new_lines.append(f"{key}={updates[key]}")
-                updated_keys.add(key)
-                continue
-        new_lines.append(line)
+@app.route("/api/import_goodreads", methods=["POST"])
+def api_import_goodreads():
+    from sync import import_goodreads_to_hardcover
+    data = request.json or {}
+    rss_url = data.get("rss_url")
+    status_id = data.get("status_id", 3)  # Default to Read
 
-    for key, val in updates.items():
-        if key not in updated_keys:
-            new_lines.append(f"{key}={val}")
+    if not rss_url:
+        return jsonify({"ok": False, "message": "RSS URL required"}), 400
 
-    env_path.write_text("\n".join(new_lines) + "\n")
-    load_dotenv(override=True)
+    config = get_config()
+    result = import_goodreads_to_hardcover(rss_url, config["hardcover_token"], config["hardcover_api_url"], status_id)
+    return jsonify({"ok": True, "result": result})
 
-    # Reschedule if interval changed
-    if "sync_interval" in data:
-        interval = int(data["sync_interval"])
-        scheduler.reschedule_job(
-            "sync_job",
-            trigger=IntervalTrigger(minutes=interval),
-        )
-        logger.info("Sync interval updated to %d minute(s)", interval)
 
-    return jsonify({"ok": True})
+@app.route("/api/fix_series")
+def api_fix_series():
+    from sync import fix_missing_series_books
+    config = get_config()
+    result = fix_missing_series_books(config["hardcover_token"], config["hardcover_api_url"])
+    return jsonify(result)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

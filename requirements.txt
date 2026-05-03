@@ -4,3 +4,4 @@ apscheduler>=3.10.4
 requests>=2.31.0
 python-dotenv>=1.0.0
 simple-websocket>=1.0.0
+openai>=1.0.0

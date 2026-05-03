@@ -422,6 +422,8 @@ input:checked + .toggle-slider::before { transform: translateX(18px); background
     <div class="tabs">
       <button class="tab active" onclick="switchTab('books')">📖 Books</button>
       <button class="tab" onclick="switchTab('log')">🖥 Live Log</button>
+      <button class="tab" onclick="switchTab('suggestions')">🤖 AI Suggestions</button>
+      <button class="tab" onclick="switchTab('goodreads')">📚 Goodreads Import</button>
       <button class="tab" onclick="switchTab('config')">⚙ Configuration</button>
     </div>
 
@@ -451,6 +453,49 @@ input:checked + .toggle-slider::before { transform: translateX(18px); background
       </div>
     </div>
 
+    <!-- AI Suggestions tab -->
+    <div class="tab-content" id="tab-suggestions">
+      <div class="panel-body">
+        <div style="margin-bottom:20px">
+          <button class="btn btn-primary" onclick="loadSuggestions()">🔄 Generate Suggestions</button>
+        </div>
+        <div id="suggestionsList" class="book-list">
+          <div class="empty">
+            <div class="empty-icon">🤖</div>
+            <p>Click "Generate Suggestions" to get AI recommendations based on your read books.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Goodreads Import tab -->
+    <div class="tab-content" id="tab-goodreads">
+      <div class="panel-body">
+        <div style="margin-bottom:20px">
+          <p style="margin-bottom:10px">Import your Goodreads books using your RSS feed URL. You can find this in your Goodreads account settings.</p>
+          <div style="display:flex; gap:10px; align-items:flex-end; margin-bottom:20px">
+            <div style="flex:1">
+              <label style="display:block; margin-bottom:5px">Goodreads RSS URL</label>
+              <input type="text" id="goodreadsRssUrl" placeholder="https://www.goodreads.com/review/list_rss/123456?key=your_key" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:3px; background:var(--surface); color:var(--cream)">
+            </div>
+            <div>
+              <label style="display:block; margin-bottom:5px">Import as Status</label>
+              <select id="goodreadsStatus" style="padding:8px; border:1px solid var(--border); border-radius:3px; background:var(--surface); color:var(--cream)">
+                <option value="3">Read</option>
+                <option value="1">Want to Read</option>
+                <option value="2">Currently Reading</option>
+              </select>
+            </div>
+            <button class="btn btn-primary" onclick="importGoodreads()">📚 Import from Goodreads</button>
+          </div>
+        </div>
+        <div id="importResults" style="display:none">
+          <h3>Import Results</h3>
+          <div id="importStats"></div>
+        </div>
+      </div>
+    </div>
+
     <!-- Config tab -->
     <div class="tab-content" id="tab-config">
       <div class="panel-body">
@@ -474,6 +519,34 @@ input:checked + .toggle-slider::before { transform: translateX(18px); background
           <div class="field">
             <label>CWA URL</label>
             <input type="text" id="cfgCwaUrl" value="{{ config.cwa_url }}">
+          </div>
+          <div class="field">
+            <label>Kobo DB path</label>
+            <input type="text" id="cfgKoboDb" value="{{ config.kobo_db_path }}" placeholder="/path/to/KoboReader.sqlite">
+          </div>
+          <div class="field">
+            <label>Kobo API URL (optional)</label>
+            <input type="text" id="cfgKoboUrl" value="{{ config.kobo_api_url }}" placeholder="https://api.kobo.com">
+          </div>
+          <div class="field">
+            <label>Kobo Email</label>
+            <input type="text" id="cfgKoboEmail" value="{{ config.kobo_email }}" placeholder="you@example.com">
+          </div>
+          <div class="field">
+            <label>Kobo Password</label>
+            <input type="password" id="cfgKoboPassword" placeholder="leave blank if using local DB">
+          </div>
+          <div class="field" style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px">
+            <label>LLM Base URL</label>
+            <input type="text" id="cfgLlmUrl" value="{{ config.llm_base_url }}" placeholder="http://localhost:11434/v1">
+          </div>
+          <div class="field">
+            <label>LLM API Key</label>
+            <input type="password" id="cfgLlmKey" placeholder="leave blank if not required">
+          </div>
+          <div class="field">
+            <label>LLM Model</label>
+            <input type="text" id="cfgLlmModel" value="{{ config.llm_model }}" placeholder="llama3.2:3b">
           </div>
           <div class="field" style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px">
             <label>Shelfmark URL</label>
@@ -697,6 +770,13 @@ function saveConfig() {
     sync_interval:         parseInt(document.getElementById('cfgInterval').value),
     cwa_db_path:           document.getElementById('cfgCwaDb').value,
     cwa_url:               document.getElementById('cfgCwaUrl').value,
+    kobo_db_path:          document.getElementById('cfgKoboDb').value,
+    kobo_api_url:          document.getElementById('cfgKoboUrl').value,
+    kobo_email:            document.getElementById('cfgKoboEmail').value,
+    kobo_password:         document.getElementById('cfgKoboPassword').value,
+    llm_base_url:          document.getElementById('cfgLlmUrl').value,
+    llm_api_key:           document.getElementById('cfgLlmKey').value,
+    llm_model:             document.getElementById('cfgLlmModel').value,
     shelfmark_url:         document.getElementById('cfgSmUrl').value,
     shelfmark_api_key:     document.getElementById('cfgSmKey').value,
     shelfmark_format:      document.getElementById('cfgSmFormat').value,
@@ -715,9 +795,95 @@ function saveConfig() {
   .catch(() => toast('Save failed', 'error'));
 }
 
-// ── Toast ──────────────────────────────────────────────────────────────────
-let toastTimer;
-function toast(msg, type='') {
+// ── AI Suggestions ──────────────────────────────────────────────────────────
+function loadSuggestions() {
+  fetch('/api/suggestions')
+    .then(r => r.json())
+    .then(suggestions => renderSuggestions(suggestions));
+}
+
+function renderSuggestions(suggestions) {
+  const el = document.getElementById('suggestionsList');
+  if (!suggestions || suggestions.length === 0) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">🤖</div><p>No suggestions available. Make sure you have read books and LLM configured.</p></div>';
+    return;
+  }
+  el.innerHTML = suggestions.map(s => `
+    <div class="book-card">
+      <div class="book-cover">
+        ${s.cover_url ? `<img src="${s.cover_url}" alt="cover" loading="lazy">` : '<div class="book-cover-placeholder">📖</div>'}
+      </div>
+      <div class="book-info">
+        <div class="book-title" title="${escHtml(s.title)}">${escHtml(s.title)}</div>
+        <div class="book-author">${escHtml(s.author || 'Unknown author')}</div>
+        <div class="book-meta">
+          <button class="btn btn-sm" onclick="addWantToRead(${s.id})">Add to Want to Read</button>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function addWantToRead(bookId) {
+  fetch('/api/add_want_to_read', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ book_id: bookId }),
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      toast('Added to Want to Read', 'success');
+    } else {
+      toast(d.message || 'Failed to add', 'error');
+    }
+  })
+  .catch(() => toast('Failed to add book', 'error'));
+}
+
+// ── Goodreads Import ────────────────────────────────────────────────────────
+function importGoodreads() {
+  const rssUrl = document.getElementById('goodreadsRssUrl').value.trim();
+  const statusId = document.getElementById('goodreadsStatus').value;
+
+  if (!rssUrl) {
+    toast('Please enter a Goodreads RSS URL', 'error');
+    return;
+  }
+
+  const btn = event.target;
+  const originalText = btn.textContent;
+  btn.textContent = 'Importing...';
+  btn.disabled = true;
+
+  fetch('/api/import_goodreads', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rss_url: rssUrl, status_id: parseInt(statusId) }),
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      const result = d.result;
+      document.getElementById('importResults').style.display = 'block';
+      document.getElementById('importStats').innerHTML = `
+        <p><strong>Books found:</strong> ${result.books_found}</p>
+        <p><strong>Books added:</strong> ${result.books_added}</p>
+        <p><strong>Books skipped:</strong> ${result.books_skipped}</p>
+        <p><strong>Errors:</strong> ${result.errors}</p>
+      `;
+      toast(`Import complete: ${result.books_added} books added`, 'success');
+    } else {
+      toast(d.message || 'Import failed', 'error');
+    }
+  })
+  .catch(() => toast('Import failed', 'error'))
+  .finally(() => {
+    btn.textContent = originalText;
+    btn.disabled = false;
+  });
+}
+
   const el = document.getElementById('toast');
   el.textContent = msg;
   el.className = 'show ' + type;
