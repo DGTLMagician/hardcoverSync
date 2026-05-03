@@ -639,11 +639,14 @@ socket.on('sync_complete', (result) => {
 // ── Tab switching ──────────────────────────────────────────────────────────
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach((t, i) => {
-    const names = ['books', 'log', 'config'];
+    const names = ['books', 'log', 'suggestions', 'goodreads', 'config'];
     t.classList.toggle('active', names[i] === name);
   });
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-  document.getElementById('tab-' + name).classList.add('active');
+  const target = document.getElementById('tab-' + name);
+  if (target) {
+    target.classList.add('active');
+  }
 }
 
 // ── Sync trigger ───────────────────────────────────────────────────────────
@@ -842,7 +845,7 @@ function addWantToRead(bookId) {
 }
 
 // ── Goodreads Import ────────────────────────────────────────────────────────
-function importGoodreads() {
+function importGoodreads(event) {
   const rssUrl = document.getElementById('goodreadsRssUrl').value.trim();
   const statusId = document.getElementById('goodreadsStatus').value;
 
@@ -851,10 +854,12 @@ function importGoodreads() {
     return;
   }
 
-  const btn = event.target;
-  const originalText = btn.textContent;
-  btn.textContent = 'Importing...';
-  btn.disabled = true;
+  const btn = event?.target || document.querySelector('#tab-goodreads .btn-primary');
+  const originalText = btn?.textContent || 'Importing...';
+  if (btn) {
+    btn.textContent = 'Importing...';
+    btn.disabled = true;
+  }
 
   fetch('/api/import_goodreads', {
     method: 'POST',
@@ -879,16 +884,19 @@ function importGoodreads() {
   })
   .catch(() => toast('Import failed', 'error'))
   .finally(() => {
-    btn.textContent = originalText;
-    btn.disabled = false;
+    if (btn) {
+      btn.textContent = originalText;
+      btn.disabled = false;
+    }
   });
 }
 
+function toast(msg, type = 'info') {
   const el = document.getElementById('toast');
   el.textContent = msg;
   el.className = 'show ' + type;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.className = '', 3000);
+  clearTimeout(window.toastTimer);
+  window.toastTimer = setTimeout(() => el.className = '', 3000);
 }
 
 function escHtml(s) {
