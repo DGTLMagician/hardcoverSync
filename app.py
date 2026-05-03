@@ -3,6 +3,7 @@ app.py  —  Hardcover ↔ CWA ↔ Shelfmark sync daemon + web dashboard
 """
 
 import os
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -34,6 +35,8 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 # Shared state (in-process; survives restarts only if you persist to JSON)
 # ─────────────────────────────────────────────────────────────────────────────
 
+STATE_FILE = os.path.join(os.path.dirname(__file__), ".sync_state.json")
+
 state = {
     "running": False,
     "last_sync_start": None,
@@ -43,6 +46,33 @@ state = {
     "log": [],
     "next_run": None,
 }
+
+def _load_persisted_state():
+    """Load last sync result from disk so widgets show data after restart."""
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE) as f:
+                saved = json.load(f)
+            state["last_sync_result"] = saved.get("last_sync_result")
+            state["last_sync_start"] = saved.get("last_sync_start")
+            state["last_sync_end"] = saved.get("last_sync_end")
+            state["last_sync_books"] = saved.get("last_sync_books", [])
+            logger.info("Loaded persisted sync state from %s", STATE_FILE)
+    except Exception as e:
+        logger.warning("Could not load persisted state: %s", e)
+
+def _save_persisted_state():
+    """Persist sync result to disk."""
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump({
+                "last_sync_result": state.get("last_sync_result"),
+                "last_sync_start": state.get("last_sync_start"),
+                "last_sync_end": state.get("last_sync_end"),
+                "last_sync_books": state.get("last_sync_books", []),
+            }, f)
+    except Exception as e:
+        logger.warning("Could not save persisted state: %s", e)
 
 
 def get_config() -> dict:
@@ -96,6 +126,7 @@ def do_sync():
     config = get_config()
     try:
         run_sync(config, state, emit_log=emit_log_entry)
+        _save_persisted_state()
         socketio.emit("sync_complete", state["last_sync_result"], namespace="/")
     except Exception as e:
         logger.exception("Unhandled error during sync: %s", e)
@@ -112,6 +143,9 @@ def do_sync():
 # ─────────────────────────────────────────────────────────────────────────────
 
 scheduler = BackgroundScheduler(daemon=True)
+
+# Load persisted state at startup (works for both __main__ and gunicorn/systemd)
+_load_persisted_state()
 
 
 def start_scheduler():
@@ -293,6 +327,7 @@ def ws_sync_now():
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    _load_persisted_state()
     start_scheduler()
     host = os.getenv("WEB_HOST", "0.0.0.0")
     port = int(os.getenv("WEB_PORT", "5055"))
