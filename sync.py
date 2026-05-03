@@ -1045,25 +1045,14 @@ def trigger_shelfmark_search(
         }
 
     except requests.exceptions.ConnectionError:
-        return {
-            "success": False,
-            "message": f"Cannot reach Shelfmark at {shelfmark_url}",
-        }
+        return {"success": False, "message": f"Cannot reach Shelfmark at {shelfmark_url}"}
     except requests.exceptions.Timeout:
-        return {
-            "success": False,
-            "message": f"Shelfmark request timed out at {shelfmark_url}",
-        }
+        return {"success": False, "message": f"Shelfmark request timed out at {shelfmark_url}"}
     except requests.RequestException as e:
-        return {
-            "success": False,
-            "message": f"Shelfmark HTTP error: {e}",
-        }
+        return {"success": False, "message": f"Shelfmark HTTP error: {e}"}
     except Exception as e:
-        return {
-            "success": False,
-            "message": f"Shelfmark error: {e}",
-        }
+        return {"success": False, "message": f"Shelfmark error: {e}"}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AI Suggestions
@@ -1071,19 +1060,28 @@ def trigger_shelfmark_search(
 
 def generate_ai_suggestions(read_books: list[dict], llm_base_url: str, llm_api_key: str, llm_model: str) -> list[str]:
     """Generate book recommendations using a local LLM based on read books."""
+    import re
+
     if not read_books:
         return []
 
-    # Prepare a list of read book titles and authors
-    book_list = [f"{book['title']} by {book['author']}" for book in read_books[:10]]  # Limit to 10 for prompt
+    book_list = "\n".join(
+        f"- {book['title']} by {book['author']}" for book in read_books[:20]
+    )
 
-    prompt = f"""
-Based on the following books that the user has read:
-{', '.join(book_list)}
+    system_msg = (
+        "You are a book recommendation engine. "
+        "You MUST respond with ONLY a numbered list of book recommendations. "
+        "Each line must follow EXACTLY this format: 'Title by Author'. "
+        "Do NOT include any thinking, reasoning, explanation, preamble, or commentary. "
+        "Do NOT use <think> tags. Output ONLY the list, nothing else."
+    )
 
-Suggest 5-10 book recommendations that the user might enjoy. Provide only the book titles and authors in a comma-separated list, like: "Title1 by Author1, Title2 by Author2".
-Do not include any other text or explanations.
-"""
+    user_msg = (
+        f"The user has read these books:\n{book_list}\n\n"
+        "Recommend 8 books they would enjoy. "
+        "Reply with ONLY the list in the format 'Title by Author', one per line."
+    )
 
     try:
         client = OpenAI(
@@ -1093,19 +1091,37 @@ Do not include any other text or explanations.
 
         response = client.chat.completions.create(
             model=llm_model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=200,
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            max_tokens=1000,
             temperature=0.7,
         )
 
-        suggestions_text = response.choices[0].message.content.strip()
-        # Parse the comma-separated list
-        suggestions = [s.strip() for s in suggestions_text.split(',') if s.strip()]
-        return suggestions[:10]  # Limit to 10
+        raw = response.choices[0].message.content or ""
+
+        # Strip thinking model output: <think>...</think> blocks (DeepSeek, QwQ, etc.)
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+
+        # Parse lines: accept "1. Title by Author", "- Title by Author", "Title by Author"
+        suggestions = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # Strip leading bullets/numbers: "1.", "-", "*"
+            line = re.sub(r"^[\d]+[.)]\s*|^[-*]\s*", "", line).strip()
+            # Must contain " by " to be a valid entry
+            if " by " in line.lower() and len(line) > 5:
+                suggestions.append(line)
+
+        return suggestions[:10]
 
     except Exception as e:
         logger.error("Failed to generate AI suggestions: %s", e)
         return []
+
 
 
 def search_hardcover_books(query: str, token: str, url: str) -> list[dict]:
