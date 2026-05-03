@@ -197,8 +197,19 @@ def api_config_get():
 @app.route("/api/suggestions")
 def api_suggestions():
     config = get_config()
-    # Get read books from state
-    read_books = [book for book in state.get("last_sync_books", []) if book.get("status_id") == 3]
+    # Get read books from CWA state
+    cwa_books = state.get("cwa_books", [])
+    
+    # Format them so `generate_ai_suggestions` can use `book['author']`
+    read_books = []
+    for book in cwa_books:
+        if book.get("status_id") == 3:
+            author_str = book.get("authors")[0] if book.get("authors") else "Unknown"
+            read_books.append({
+                "title": book.get("title"),
+                "author": author_str
+            })
+
     suggestions = generate_ai_suggestions(
         read_books=read_books,
         llm_base_url=config.get("llm_base_url"),

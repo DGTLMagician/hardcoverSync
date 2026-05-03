@@ -1563,6 +1563,7 @@ def run_sync(config: dict, state: dict, emit_log=None) -> dict:
         # 2. Load CWA library
         log("Reading Calibre/CWA library…")
         cwa_books = lookup_cwa_library(config["cwa_db_path"])
+        state["cwa_books"] = cwa_books
         log(f"CWA library contains {len(cwa_books)} book(s)")
 
         kobo_books = lookup_kobo_library(config.get("kobo_db_path", ""))
