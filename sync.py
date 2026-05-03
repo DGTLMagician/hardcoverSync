@@ -553,7 +553,7 @@ def lookup_cwa_library(db_path: str) -> list[dict]:
         cur = con.cursor()
 
         try:
-            cur.execute("SELECT id, title, pubdate, last_modified, uuid FROM books")
+            cur.execute("SELECT id, title, pubdate, last_modified, uuid, series_index FROM books")
         except sqlite3.OperationalError as e:
             logger.error("CWA DB query error: %s", e)
             return []
@@ -596,16 +596,16 @@ def lookup_cwa_library(db_path: str) -> list[dict]:
             )
             tags = [r[0] for r in cur.fetchall()]
 
-            # Series
+            # Series — series_index lives on the books table, not books_series_link
             cur.execute(
-                "SELECT series.name, books_series_link.series_index FROM books_series_link "
+                "SELECT series.name FROM books_series_link "
                 "JOIN series ON series.id = books_series_link.series "
                 "WHERE books_series_link.book = ?",
                 (book_id,),
             )
             series_rows = cur.fetchall()
             series_name = series_rows[0][0] if series_rows else None
-            series_index = series_rows[0][1] if series_rows else None
+            series_index = row["series_index"] if series_rows else None
 
             status_id = _cwa_status_from_tags(tags)
             books.append(
