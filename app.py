@@ -118,14 +118,14 @@ def emit_log_entry(entry: dict):
     socketio.emit("log_entry", entry, namespace="/")
 
 
-def do_sync():
+def do_sync(dry_run: bool = False):
     """Called by scheduler and manual trigger."""
     if state["running"]:
         logger.info("Sync already running, skipping.")
         return
     config = get_config()
     try:
-        run_sync(config, state, emit_log=emit_log_entry)
+        run_sync(config, state, emit_log=emit_log_entry, dry_run=dry_run)
         _save_persisted_state()
         socketio.emit("sync_complete", state["last_sync_result"], namespace="/")
     except Exception as e:
@@ -149,7 +149,7 @@ _load_persisted_state()
 
 
 def start_scheduler():
-    interval = int(os.getenv("SYNC_INTERVAL_MINUTES", "15"))
+    interval = int(os.getenv("SYNC_INTERVAL_MINUTES", "60"))
     scheduler.add_job(
         do_sync,
         trigger=IntervalTrigger(minutes=interval),
@@ -216,8 +216,15 @@ def api_sync_now():
     """Manual sync trigger via API or UI button."""
     if state["running"]:
         return jsonify({"ok": False, "message": "Sync already running"}), 409
-    socketio.start_background_task(do_sync)
-    return jsonify({"ok": True, "message": "Sync started"})
+    dry_run = request.args.get("dry", "false").lower() == "true"
+    socketio.start_background_task(do_sync, dry_run=dry_run)
+    return jsonify({"ok": True, "message": f"Sync started{' (Dry Run)' if dry_run else ''}"})
+
+
+@app.route("/api/sync/dry", methods=["POST"])
+def api_sync_dry():
+    """Explicit dry run trigger."""
+    return api_sync_now()
 
 
 @app.route("/api/config", methods=["GET"])
@@ -357,10 +364,11 @@ def ws_connect():
 
 
 @socketio.on("sync_now")
-def ws_sync_now():
+def ws_sync_now(data=None):
     if not state["running"]:
-        socketio.start_background_task(do_sync)
-        emit("ack", {"message": "Sync started"})
+        dry_run = data.get("dry_run", False) if data else False
+        socketio.start_background_task(do_sync, dry_run=dry_run)
+        emit("ack", {"message": f"Sync started{' (Dry Run)' if dry_run else ''}"})
     else:
         emit("ack", {"message": "Already running"})
 

@@ -306,10 +306,11 @@ class LocalSyncState:
         conn.close()
 
 class SyncManager:
-    def __init__(self, cwa_client: CwaKoboClient, hc_client: HardcoverClient, local_state: LocalSyncState, log_func=None):
+    def __init__(self, cwa_client: CwaKoboClient, hc_client: HardcoverClient, local_state: LocalSyncState, config: dict = None, log_func=None):
         self.cwa_client = cwa_client
         self.hc_client = hc_client
         self.local_state = local_state
+        self.config = config or {}
         self.log_func = log_func
 
     def log(self, msg: str, level: str = "info"):
@@ -327,17 +328,15 @@ class SyncManager:
         s = f"{state.get('progressPercent')}_{state.get('progressPages')}_{state.get('completed')}"
         return hashlib.md5(s.encode()).hexdigest()
 
-    def run(self):
-        self.log(f"Starting CWA-Kobo to Hardcover sync...")
+    def run(self, dry_run: bool = False):
+        prefix = "[DRY RUN] " if dry_run else ""
+        self.log(f"Starting {prefix}CWA-Kobo to Hardcover sync...")
         
         library = self.cwa_client.get_library_sync()
         if not library:
             self.log("No books returned from CWA Kobo sync.", "warning")
             return
 
-        # If it's a Kobo response with 'Updated' list:
-        # Some endpoints return [{"BookID": "uuid", "Title": "...", ...}]
-        # I'll normalize it to a flat list of dicts that have UUID or BookID
         items = []
         for item in library:
             if "BookID" in item or "Id" in item or "uuid" in item:
@@ -346,26 +345,19 @@ class SyncManager:
                 items.append(item["SyncItem"])
                 
         if not items:
-            items = library # Fallback
+            items = library
 
         self.log(f"Found {len(items)} items in CWA Kobo library.")
-        
-        stats = {
-            "seen": 0, "matched": 0, "skipped": 0, "updated": 0, 
-            "completed": 0, "manual_match_required": 0
-        }
+        stats = {"seen": 0, "matched": 0, "skipped": 0, "updated": 0, "completed": 0, "manual_match_required": 0}
 
         for item in items:
             uuid = item.get("BookID") or item.get("Id") or item.get("uuid")
-            if not uuid:
-                continue
+            if not uuid: continue
 
             stats["seen"] += 1
-
             raw_state = self.cwa_client.get_book_state(uuid)
             parsed = self.cwa_client.parse_state(uuid, item, raw_state)
             
-            # Skip if progress is 0 and not completed (unread)
             if not parsed["completed"] and (parsed["progressPercent"] is None or parsed["progressPercent"] == 0):
                 stats["skipped"] += 1
                 continue
@@ -380,75 +372,64 @@ class SyncManager:
             hc_book_id = local_entry.get("hardcover_book_id") or parsed["hardcoverBookId"]
             
             if not hc_book_id:
-                # Match
+                isbn = parsed.get("isbn13")
+                query = isbn if isbn else parsed.get("title")
                 self.log(f"Matching '{parsed['title']}'...")
-                res = search_hardcover_books(parsed["isbn13"] or parsed["title"], self.hc_client.token, self.hc_client.api_url)
-                if res:
-                    hc_book_id = res[0].get("id")
-                    
-            if not hc_book_id:
-                self.log(f"Could not match '{parsed['title']}' to Hardcover. Needs manual match.", "warning")
-                stats["manual_match_required"] += 1
-                self.local_state.update_state(uuid, {
-                    "last_cwa_state_hash": state_hash,
-                    "manual_match_required": True,
-                    "last_error": "No match found"
-                })
-                continue
+                search_results = search_hardcover_books(query, self.hc_client.token, self.hc_client.api_url)
+                if search_results:
+                    hc_book_id = search_results[0]["id"]
+                    self.local_state.update_state(uuid, {"hardcover_book_id": hc_book_id})
+                else:
+                    self.log(f"Could not find match for '{parsed['title']}'", "warning")
+                    self.local_state.update_state(uuid, {"manual_match_required": 1})
+                    stats["manual_match_required"] += 1
+                    continue
 
             stats["matched"] += 1
-            
-            # Statuses are hardcoded based on sync.py rules
             target_status_id = 3 if parsed["completed"] else 2
             
             try:
+                existing = self.hc_client.get_user_book(hc_book_id)
+                user_book_id = None
+
                 if not existing:
-                    self.log(f"Inserting new user_book for '{parsed['title']}' with status {target_status_id}")
-                    # Hardcoded privacy setting 1 (Public)
-                    ins = self.hc_client.insert_user_book(hc_book_id, target_status_id, parsed["hardcoverEditionId"], 1)
-                    if ins and "insert_user_book" in ins:
-                        user_book_id = ins["insert_user_book"]["id"]
+                    self.log(f"  → {prefix}Inserting user_book for '{parsed['title']}' status {target_status_id}")
+                    if not dry_run:
+                        ins = self.hc_client.insert_user_book(hc_book_id, target_status_id, parsed["hardcoverEditionId"], 1)
+                        if ins and "insert_user_book" in ins:
+                            user_book_id = ins["insert_user_book"]["id"]
                 else:
                     user_book_id = existing["id"]
-                    curr_status = existing["status_id"]
-                    
-                    # Conflict rules
-                    # Don't downgrade Read (3) to Currently Reading (2)
-                    if curr_status == 3 and target_status_id == 2:
-                        self.log(f"Skipping status update for '{parsed['title']}' (already Read on Hardcover).")
-                    elif curr_status != target_status_id:
-                        self.log(f"Updating user_book for '{parsed['title']}' to status {target_status_id}")
-                        self.hc_client.update_user_book(user_book_id, target_status_id)
-                
-                # Upsert read record
+                    hc_status_id = existing.get("status_id")
+                    if hc_status_id != target_status_id and not (hc_status_id == 3 and target_status_id == 2):
+                        self.log(f"  → {prefix}Updating status for '{parsed['title']}' to {target_status_id}")
+                        if not dry_run: self.hc_client.update_user_book(user_book_id, target_status_id)
+
                 if user_book_id:
                     reads = existing.get("user_book_reads", []) if existing else []
-                    read_id = reads[0]["id"] if reads else None
-                    
-                    if read_id:
-                        self.hc_client.update_user_book_read(read_id, parsed["progressPercent"], parsed["progressPages"], parsed["completed"])
+                    if reads:
+                        self.log(f"  → {prefix}Updating progress for '{parsed['title']}': {parsed['progressPercent']*100:.1f}%")
+                        if not dry_run: self.hc_client.update_user_book_read(reads[0]["id"], parsed["progressPercent"], parsed["progressPages"], parsed["completed"])
                     else:
-                        self.hc_client.insert_user_book_read(user_book_id, parsed["progressPercent"], parsed["progressPages"], parsed["completed"])
+                        self.log(f"  → {prefix}Inserting progress for '{parsed['title']}': {parsed['progressPercent']*100:.1f}%")
+                        if not dry_run: self.hc_client.insert_user_book_read(user_book_id, parsed["progressPercent"], parsed["progressPages"], parsed["completed"])
 
                 self.local_state.update_state(uuid, {
                     "hardcover_book_id": hc_book_id,
-                    "hardcover_user_book_id": user_book_id,
                     "last_cwa_state_hash": state_hash,
                     "manual_match_required": False,
                     "last_synced_at": datetime.now(timezone.utc).isoformat(),
                     "last_error": None
                 })
-                
                 stats["updated"] += 1
                 if parsed["completed"]: stats["completed"] += 1
-                
             except Exception as e:
                 self.log(f"Error syncing {parsed['title']}: {e}", "error")
                 self.local_state.update_state(uuid, {"last_error": str(e)})
 
         self.log(f"CWA Kobo Sync finished. Stats: {stats}")
 
-def run_cwa_kobo_sync(config: dict, log_func=None):
+def run_cwa_kobo_sync(config: dict, log_func=None, dry_run: bool = False):
     cwa_url = config.get("cwa_url")
     cwa_user = config.get("cwa_user")
     hc_token = config.get("hardcover_token")
@@ -462,5 +443,5 @@ def run_cwa_kobo_sync(config: dict, log_func=None):
     hc_client = HardcoverClient(hc_token, config.get("hardcover_api_url", "https://api.hardcover.app/v1/graphql"))
     local_state = LocalSyncState()
     
-    manager = SyncManager(cwa_client, hc_client, local_state, log_func)
-    manager.run()
+    manager = SyncManager(cwa_client, hc_client, local_state, config, log_func)
+    manager.run(dry_run=dry_run)

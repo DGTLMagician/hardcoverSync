@@ -379,6 +379,9 @@ input:checked + .toggle-slider::before { transform: translateX(18px); background
       </div>
     </div>
     <div class="header-actions">
+      <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);cursor:pointer" title="Simulate sync without making any changes to Hardcover or Shelfmark">
+        <input type="checkbox" id="dryRunToggle" style="accent-color:var(--gold)"> Dry Run
+      </label>
       <span id="syncPill" class="sync-pill idle"><span class="dot"></span><span id="syncPillText">Idle</span></span>
       <span id="nextRunBadge" class="next-run-badge">Next: —</span>
       <button class="btn btn-primary" id="syncBtn" onclick="triggerSync()">⟳ Sync Now</button>
@@ -409,6 +412,11 @@ input:checked + .toggle-slider::before { transform: translateX(18px); background
       <div class="stat-label">Downloaded</div>
       <div class="stat-value" id="statDownloaded">—</div>
       <div class="stat-sub">Shelfmark requests</div>
+    </div>
+    <div class="stat-card gold">
+      <div class="stat-label">Efficiency</div>
+      <div class="stat-value" id="statSaved">—</div>
+      <div class="stat-sub">requests saved</div>
     </div>
     <div class="stat-card red">
       <div class="stat-label">Errors</div>
@@ -656,12 +664,13 @@ function switchTab(name) {
 
 // ── Sync trigger ───────────────────────────────────────────────────────────
 function triggerSync() {
-  fetch('/api/sync', { method: 'POST' })
+  const dryRun = document.getElementById('dryRunToggle').checked;
+  fetch('/api/sync?dry=' + dryRun, { method: 'POST' })
     .then(r => r.json())
     .then(d => {
       if (d.ok) {
         setRunning(true);
-        toast('Sync started', 'success');
+        toast(d.message, 'success');
         switchTab('log');
       } else {
         toast(d.message, 'error');
@@ -750,6 +759,7 @@ function updateStats(r) {
   document.getElementById('statInCwa').textContent      = r.books_in_cwa ?? '—';
   document.getElementById('statSyncedCwa').textContent  = r.books_synced_to_cwa ?? '—';
   document.getElementById('statDownloaded').textContent = r.books_downloaded ?? '—';
+  document.getElementById('statSaved').textContent      = r.api_requests_saved ?? '—';
   document.getElementById('statErrors').textContent     = r.errors ?? '—';
   if (r.started_at) {
     const d = new Date(r.started_at);

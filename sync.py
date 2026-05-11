@@ -8,6 +8,7 @@ import logging
 import requests
 import os
 import json
+import hashlib
 from datetime import datetime, timezone
 from typing import Optional, Any
 from openai import OpenAI
@@ -15,6 +16,110 @@ import xml.etree.ElementTree as ET
 from urllib.parse import urlparse
 
 logger = logging.getLogger("hardcover_sync")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Persistent State
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SyncState:
+    def __init__(self, db_path: str = "sync_state.db"):
+        self.db_path = db_path
+        self.setup()
+
+    def setup(self):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        # Mapping CWA book ID to Hardcover book ID and sync metadata
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS book_mapping (
+                cwa_id INTEGER PRIMARY KEY,
+                hardcover_id INTEGER,
+                last_modified TEXT,
+                last_synced_hash TEXT,
+                last_synced_at TEXT
+            )
+        ''')
+        # Cache for search results to avoid re-searching missing books too often
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS search_cache (
+                query TEXT PRIMARY KEY,
+                hardcover_id INTEGER,
+                last_attempted TEXT
+            )
+        ''')
+        # General state for flags and timestamps
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS general_state (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+
+    def get_mapping(self, cwa_id: int) -> dict:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM book_mapping WHERE cwa_id = ?", (cwa_id,))
+        row = c.fetchone()
+        conn.close()
+        return dict(row) if row else {}
+
+    def update_mapping(self, cwa_id: int, updates: dict):
+        current = self.get_mapping(cwa_id)
+        merged = {**current, **updates, "cwa_id": cwa_id}
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('''
+            INSERT OR REPLACE INTO book_mapping (
+                cwa_id, hardcover_id, last_modified, last_synced_hash, last_synced_at
+            ) VALUES (?, ?, ?, ?, ?)
+        ''', (
+            merged.get("cwa_id"),
+            merged.get("hardcover_id"),
+            merged.get("last_modified"),
+            merged.get("last_synced_hash"),
+            merged.get("last_synced_at")
+        ))
+        conn.commit()
+        conn.close()
+
+    def get_search_cache(self, query: str) -> dict:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM search_cache WHERE query = ?", (query,))
+        row = c.fetchone()
+        conn.close()
+        return dict(row) if row else {}
+
+    def update_search_cache(self, query: str, hardcover_id: Optional[int]):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('''
+            INSERT OR REPLACE INTO search_cache (query, hardcover_id, last_attempted)
+            VALUES (?, ?, ?)
+        ''', (query, hardcover_id, datetime.now(timezone.utc).isoformat()))
+        conn.commit()
+        conn.close()
+
+    def get_general_state(self, key: str) -> Optional[str]:
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute("SELECT value FROM general_state WHERE key = ?", (key,))
+        row = c.fetchone()
+        conn.close()
+        return row[0] if row else None
+
+    def update_general_state(self, key: str, value: str):
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute("INSERT OR REPLACE INTO general_state (key, value) VALUES (?, ?)", (key, value))
+        conn.commit()
+        conn.close()
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -393,59 +498,124 @@ def _hc_query(query: str, variables: dict = None, token: str = None, url: str = 
         return None
 
 
-def fetch_hardcover_books(token: str, url: str, status_ids: list[int]) -> list[dict]:
-    """Fetch user books from Hardcover with given status IDs."""
-    query = """
-    query GetUserBooks($statusIds: [Int!]!) {
-      me {
-        user_books(where: {status_id: {_in: $statusIds}}) {
-          id
-          status_id
-          rating
-          date_added
-          user_book_reads(limit: 1, order_by: {started_at: desc_nulls_last}) {
-            started_at
-            finished_at
-            progress
-          }
-          book {
-            id
-            title
-            slug
-            cached_contributors
-            cached_image
-            editions(limit: 5, where: {isbn_13: {_is_null: false}}) {
-              isbn_13
-              isbn_10
+def fetch_hardcover_books(token: str, url: str, status_ids: list[int] = None) -> list[dict]:
+    """Fetch user books from Hardcover with pagination."""
+    all_user_books = []
+    limit = 100
+    offset = 0
+
+    while True:
+        if status_ids:
+            query = """
+            query GetUserBooks($statusIds: [Int!]!, $limit: Int!, $offset: Int!) {
+              me {
+                user_books(where: {status_id: {_in: $statusIds}}, limit: $limit, offset: $offset) {
+                  id
+                  status_id
+                  rating
+                  date_added
+                  user_book_reads(limit: 1, order_by: {started_at: desc_nulls_last}) {
+                    started_at
+                    finished_at
+                    progress
+                  }
+                  book {
+                    id
+                    title
+                    slug
+                    cached_contributors
+                    cached_image
+                    editions(limit: 5, where: {isbn_13: {_is_null: false}}) {
+                      isbn_13
+                      isbn_10
+                    }
+                  }
+                }
+              }
             }
-          }
-        }
-      }
-    }
+            """
+            variables = {"statusIds": status_ids, "limit": limit, "offset": offset}
+        else:
+            query = """
+            query GetUserBooksAll($limit: Int!, $offset: Int!) {
+              me {
+                user_books(limit: $limit, offset: $offset) {
+                  id
+                  status_id
+                  rating
+                  date_added
+                  user_book_reads(limit: 1, order_by: {started_at: desc_nulls_last}) {
+                    started_at
+                    finished_at
+                    progress
+                  }
+                  book {
+                    id
+                    title
+                    slug
+                    cached_contributors
+                    cached_image
+                    editions(limit: 5, where: {isbn_13: {_is_null: false}}) {
+                      isbn_13
+                      isbn_10
+                    }
+                  }
+                }
+              }
+            }
+            """
+            variables = {"limit": limit, "offset": offset}
+
+        data = _hc_query(query, variables, token=token, url=url)
+        if not data or not data.get("me"):
+            break
+
+        me = data["me"]
+        if isinstance(me, list):
+            me = me[0] if me else {}
+
+        batch = me.get("user_books", [])
+        if not batch:
+            break
+
+        all_user_books.extend(batch)
+        if len(batch) < limit:
+            break
+        offset += limit
+
+    return all_user_books
+
+
+def batch_update_hardcover_status(token: str, url: str, updates: list[dict]) -> bool:
     """
+    Batch update multiple user book statuses in a single GraphQL request.
+    updates should be a list of dicts: [{"user_book_id": 123, "status_id": 3}, ...]
+    """
+    if not updates:
+        return True
 
-    data = _hc_query(query, {"statusIds": status_ids}, token=token, url=url)
-    if not data:
-        return []
+    mutation_lines = ["mutation BatchUpdateStatus("]
+    variables = {}
+    
+    for i, up in enumerate(updates):
+        mutation_lines.append(f"  $id{i}: Int!, $s{i}: Int!,")
+        variables[f"id{i}"] = up["user_book_id"]
+        variables[f"s{i}"] = up["status_id"]
+    
+    # Remove last comma and close variables decl
+    mutation_lines[-1] = mutation_lines[-1].rstrip(",")
+    mutation_lines.append(") {")
+    
+    for i, up in enumerate(updates):
+        alias = f"m{i}"
+        mutation_lines.append(f"  {alias}: update_user_book_by_pk(pk_columns: {{id: $id{i}}}, _set: {{status_id: $s{i}}}) {{ id }}")
+    
+    mutation_lines.append("}")
+    mutation = "\n".join(mutation_lines)
 
-    me = data.get("me")
+    data = _hc_query(mutation, variables, token=token, url=url)
+    return data is not None
 
-    # Hardcover/Hasura can return me as a list, commonly with one current user.
-    if isinstance(me, list):
-        if not me:
-            return []
-        me = me[0]
-
-    if not isinstance(me, dict):
-        logger.error("Unexpected Hardcover 'me' response shape: %r", me)
-        return []
-
-    user_books = me.get("user_books", [])
-    if not isinstance(user_books, list):
-        logger.error("Unexpected Hardcover 'user_books' response shape: %r", user_books)
-        return []
-
-    return user_books
 
 def update_hardcover_status(
     token: str,
@@ -456,59 +626,27 @@ def update_hardcover_status(
 ) -> bool:
     """
     Update a user_book status/rating on Hardcover.
-
-    Dates (started_at/finished_at) zitten op user_book_reads, niet op user_books,
-    en worden hier niet gesynchroniseerd.
-
-    Belangrijk:
-    Als rating None is, sturen we geen rating-field mee. Anders kan een API
-    dit interpreteren als rating=null en bestaande ratings wissen.
     """
     if rating is None:
         mutation = """
-        mutation UpdateUserBook(
-          $id: Int!,
-          $statusId: Int
-        ) {
-          update_user_book(
-            id: $id,
-            object: {
-              status_id: $statusId
-            }
-          ) {
+        mutation UpdateUserBook($id: Int!, $statusId: Int) {
+          update_user_book_by_pk(pk_columns: {id: $id}, _set: {status_id: $statusId}) {
             id
             status_id
           }
         }
         """
-        variables = {
-            "id": user_book_id,
-            "statusId": status_id,
-        }
+        variables = {"id": user_book_id, "statusId": status_id}
     else:
         mutation = """
-        mutation UpdateUserBook(
-          $id: Int!,
-          $statusId: Int,
-          $rating: numeric
-        ) {
-          update_user_book(
-            id: $id,
-            object: {
-              status_id: $statusId,
-              rating: $rating
-            }
-          ) {
+        mutation UpdateUserBook($id: Int!, $statusId: Int, $rating: numeric) {
+          update_user_book_by_pk(pk_columns: {id: $id}, _set: {status_id: $statusId, rating: $rating}) {
             id
             status_id
           }
         }
         """
-        variables = {
-            "id": user_book_id,
-            "statusId": status_id,
-            "rating": rating,
-        }
+        variables = {"id": user_book_id, "statusId": status_id, "rating": rating}
 
     data = _hc_query(mutation, variables, token=token, url=url)
     return data is not None
@@ -1600,13 +1738,12 @@ def import_goodreads_to_hardcover(rss_url: str, token: str, url: str, status_id:
 # Main sync orchestrator
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_sync(config: dict, state: dict, emit_log=None) -> dict:
+def run_sync(config: dict, state: dict, emit_log=None, dry_run: bool = False) -> dict:
     """
     Main sync function. Returns a result dict with counts and log entries.
-    state is a shared mutable dict updated in place.
-    emit_log(msg, level) is an optional callback for real-time log streaming.
     """
     state.setdefault("log", [])
+    sync_state = SyncState()
 
     result = {
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -1615,22 +1752,20 @@ def run_sync(config: dict, state: dict, emit_log=None) -> dict:
         "books_downloaded": 0,
         "books_skipped": 0,
         "books_synced_to_cwa": 0,
+        "api_requests_saved": 0,
         "errors": 0,
+        "dry_run": dry_run
     }
 
     def log(msg: str, level: str = "info"):
         ts = datetime.now().strftime("%H:%M:%S")
         entry = {"time": ts, "level": level, "msg": msg}
-
         state.setdefault("log", [])
         state["log"].append(entry)
-
         if len(state["log"]) > 500:
             state["log"] = state["log"][-500:]
-
         log_func = getattr(logger, level, logger.info)
         log_func(msg)
-
         if emit_log:
             emit_log(entry)
 
@@ -1638,40 +1773,23 @@ def run_sync(config: dict, state: dict, emit_log=None) -> dict:
     state["last_sync_start"] = datetime.now().isoformat()
 
     try:
-        log("─── Sync started ───")
+        prefix = "[DRY RUN] " if dry_run else ""
+        log(f"─── {prefix}Sync started ───")
 
-        # 1. Fetch books from Hardcover
-        log("Fetching books from Hardcover…")
-
-        status_ids = config.get("sync_statuses", [1, 2, 3])
-        if not isinstance(status_ids, list):
-            status_ids = [1, 2, 3]
-
-        # Always include status 3 (Read) so we can push it back to CWA,
-        # even if the user's sync_statuses config doesn't include it.
-        fetch_ids = sorted(set(status_ids) | {3})
-        hc_books = fetch_hardcover_books(
+        # 1. Fetch ALL books from Hardcover once
+        log("Fetching Hardcover library lookup table...")
+        all_hc_books = fetch_hardcover_books(
             token=config["hardcover_token"],
             url=config["hardcover_api_url"],
-            status_ids=fetch_ids,
+            status_ids=None
         )
+        
+        if not all_hc_books:
+            log("No books returned from Hardcover.", "warning")
+        else:
+            log(f"Found {len(all_hc_books)} book(s) on Hardcover")
 
-        if not hc_books:
-            log(
-                "No books returned from Hardcover. This can mean: no matching statuses, invalid token, or a GraphQL/API error.",
-                "warning",
-            )
-            result["finished_at"] = datetime.now(timezone.utc).isoformat()
-            state["last_sync_result"] = result
-            state["last_sync_end"] = datetime.now().isoformat()
-            return result
-
-        status_labels = ", ".join(
-            HARDCOVER_STATUS_LABELS.get(status_id, str(status_id))
-            for status_id in status_ids
-        )
-        log(f"Found {len(hc_books)} book(s) on Hardcover with status: {status_labels}")
-        result["books_checked"] = len(hc_books)
+        hc_by_id = {b["book"]["id"]: b for b in all_hc_books if b.get("book", {}).get("id")}
 
         # 2. Load CWA library
         log("Reading Calibre/CWA library…")
@@ -1680,265 +1798,155 @@ def run_sync(config: dict, state: dict, emit_log=None) -> dict:
         log(f"CWA library contains {len(cwa_books)} book(s)")
 
         kobo_books = lookup_kobo_library(config.get("kobo_db_path", ""))
-        log(f"Kobo sync: found {len(kobo_books)} read book(s) from Kobo")
+        
+        processed_hc_ids = set()
+        pending_hc_updates = []
 
-        sync_results = []
-
-        # 3. For each Hardcover book, compare Hardcover / CWA / Kobo status and sync accordingly
-        for user_book in hc_books:
-            book = user_book.get("book") or {}
-
-            title = book.get("title") or "Unknown Title"
-            authors = _extract_authors(book.get("cached_contributors"))
-            author_str = authors[0] if authors else ""
-
-            isbn13 = _best_isbn13(book.get("editions", []))
-            cover_url = _extract_cover_url(book.get("cached_image"))
-
-            status_id = user_book.get("status_id", 0)
-            status_label = HARDCOVER_STATUS_LABELS.get(status_id, "Unknown")
-
-            cwa_match = find_book_in_cwa(cwa_books, title, authors, isbn13)
-            cwa_status_id = cwa_match.get("status_id") if cwa_match else 0
-            kobo_match = find_book_in_cwa(kobo_books, title, authors, isbn13)
-            kobo_status_id = 3 if kobo_match else 0
-
-            book_entry = {
-                "hc_id": book.get("id"),
-                "ub_id": user_book.get("id"),
-                "title": title,
-                "author": author_str,
-                "isbn13": isbn13,
-                "status": status_label,
-                "status_id": status_id,
-                "cwa_status_id": cwa_status_id,
-                "cwa_status": CWA_STATUS_LABELS.get(cwa_status_id, "Unknown"),
-                "kobo_status_id": kobo_status_id,
-                "kobo_status": "Read" if kobo_status_id == 3 else "Unknown",
-                "in_cwa": False,
-                "download_triggered": False,
-                "download_result": None,
-                "cover_url": cover_url,
-            }
-
-            if cwa_match:
-                result["books_in_cwa"] += 1
-                book_entry["in_cwa"] = True
-                log(f"✓ '{title}' — found in CWA (book_id={cwa_match['id']}, status={book_entry['cwa_status']})")
-
-            read_wins = status_id == 3 or cwa_status_id == 3 or kobo_status_id == 3
-
-            # ── Hardcover → CWA status sync ──────────────────────────────
-            if cwa_match and status_id in (1, 2, 3) and cwa_status_id != status_id:
-                # Hardcover Read always wins
-                target_cwa = 3 if read_wins else status_id
-                if target_cwa != cwa_status_id:
-                    updated = update_cwa_book_status(config["cwa_db_path"], cwa_match["id"], target_cwa)
-                    if updated:
-                        result["books_synced_to_cwa"] += 1
-                        book_entry["cwa_status_id"] = target_cwa
-                        book_entry["cwa_status"] = CWA_STATUS_LABELS.get(target_cwa, "Unknown")
-                        log(f"  → CWA status updated to '{CWA_STATUS_LABELS.get(target_cwa)}' for '{title}'")
-                    else:
-                        result["errors"] += 1
-                        log(f"  ✗ Failed to update CWA status for '{title}'", "error")
-
-            if read_wins and status_id != 3:
-                if update_hardcover_status(
-                    token=config["hardcover_token"],
-                    url=config["hardcover_api_url"],
-                    user_book_id=user_book.get("id"),
-                    status_id=3,
-                ):
-                    status_id = 3
-                    status_label = HARDCOVER_STATUS_LABELS[3]
-                    book_entry["status_id"] = 3
-                    book_entry["status"] = status_label
-                    log(f"  → Marked '{title}' as Read in Hardcover")
+        def flush_hc_updates():
+            if not pending_hc_updates:
+                return
+            log(f"Flushing {len(pending_hc_updates)} status update(s) to Hardcover...")
+            if not dry_run:
+                if batch_update_hardcover_status(config["hardcover_token"], config["hardcover_api_url"], pending_hc_updates):
+                    result["api_requests_saved"] += (len(pending_hc_updates) - 1)
                 else:
                     result["errors"] += 1
-                    log(f"  ✗ Failed to mark '{title}' as Read in Hardcover", "error")
+            pending_hc_updates.clear()
 
-            elif cwa_match and cwa_status_id != 3 and status_id != 3:
-                if status_id != 1:
-                    if update_hardcover_status(
-                        token=config["hardcover_token"],
-                        url=config["hardcover_api_url"],
-                        user_book_id=user_book.get("id"),
-                        status_id=1,
-                    ):
-                        status_id = 1
-                        status_label = HARDCOVER_STATUS_LABELS[1]
-                        book_entry["status_id"] = 1
-                        book_entry["status"] = status_label
-                        log(f"  → Marked '{title}' as Want to Read in Hardcover")
+        # 3. Sync CWA books to Hardcover
+        log("Checking CWA books for sync...")
+        for cwa_book in cwa_books:
+            title = cwa_book["title"]
+            authors = cwa_book["authors"]
+            isbn13 = cwa_book["isbn13"]
+            cwa_id = cwa_book["id"]
+            cwa_status_id = cwa_book["status_id"]
+            last_modified = str(cwa_book.get("last_modified", ""))
+
+            mapping = sync_state.get_mapping(cwa_id)
+            hc_id = mapping.get("hardcover_id")
+            
+            state_hash = hashlib.md5(f"{cwa_status_id}".encode()).hexdigest()
+            if mapping.get("last_modified") == last_modified and mapping.get("last_synced_hash") == state_hash:
+                if hc_id: processed_hc_ids.add(hc_id)
+                result["books_skipped"] += 1
+                result["api_requests_saved"] += 1
+                continue
+
+            hc_book = hc_by_id.get(hc_id) if hc_id else find_book_in_hc(all_hc_books, title, authors, isbn13)
+            
+            if hc_book:
+                hc_id = hc_book["book"]["id"]
+                processed_hc_ids.add(hc_id)
+                sync_state.update_mapping(cwa_id, {"hardcover_id": hc_id})
+                hc_status_id = hc_book.get("status_id")
+                
+                kobo_match = find_book_in_cwa(kobo_books, title, authors, isbn13)
+                kobo_status_id = 3 if kobo_match else 0
+                read_wins = hc_status_id == 3 or cwa_status_id == 3 or kobo_status_id == 3
+                
+                if cwa_status_id != hc_status_id and hc_status_id in (1, 2, 3):
+                    target_cwa = 3 if read_wins else hc_status_id
+                    if target_cwa != cwa_status_id:
+                        log(f"  → {prefix}Updating CWA status for '{title}' to {CWA_STATUS_LABELS.get(target_cwa)}")
+                        if not dry_run:
+                            if update_cwa_book_status(config["cwa_db_path"], cwa_id, target_cwa):
+                                result["books_synced_to_cwa"] += 1
+                            else:
+                                result["errors"] += 1
+
+                if read_wins and hc_status_id != 3:
+                    pending_hc_updates.append({"user_book_id": hc_book["id"], "status_id": 3})
+                    log(f"  → {prefix}Queuing Hardcover 'Read' update for '{title}'")
+                elif cwa_status_id != 0 and cwa_status_id != hc_status_id and hc_status_id not in (1, 2, 3):
+                    pending_hc_updates.append({"user_book_id": hc_book["id"], "status_id": cwa_status_id})
+                    log(f"  → {prefix}Queuing Hardcover status update for '{title}' to {HARDCOVER_STATUS_LABELS.get(cwa_status_id)}")
+
+                if len(pending_hc_updates) >= 20:
+                    flush_hc_updates()
+            else:
+                query = isbn13 or f"{title} {authors[0] if authors else ''}"
+                cache = sync_state.get_search_cache(query)
+                cooldown = 24 * 3600
+                last_attempt = datetime.fromisoformat(cache.get("last_attempted")) if cache.get("last_attempted") else None
+                
+                if not cache or (not cache.get("hardcover_id") and (not last_attempt or (datetime.now(timezone.utc) - last_attempt).total_seconds() > cooldown)):
+                    log(f"Searching Hardcover for '{title}'...")
+                    if not dry_run:
+                        search_res = search_hardcover_books(query, config["hardcover_token"], config["hardcover_api_url"])
+                        if search_res:
+                            hc_id = search_res[0]["id"]
+                            sync_state.update_search_cache(query, hc_id)
+                            sync_state.update_mapping(cwa_id, {"hardcover_id": hc_id})
+                            target = cwa_status_id if cwa_status_id in (1, 2, 3) else 1
+                            add_hardcover_book_status(hc_id, target, config["hardcover_token"], config["hardcover_api_url"])
+                            log(f"  ✓ Found and added '{title}' to Hardcover")
+                        else:
+                            sync_state.update_search_cache(query, None)
+                            log(f"  ✗ '{title}' not found, caching failure")
                     else:
-                        result["errors"] += 1
-                        log(f"  ✗ Failed to update Hardcover status for '{title}'", "error")
+                        log(f"  [DRY] Would search Hardcover for '{title}'")
 
-            if not cwa_match:
-                log(f"✗ '{title}' — not in CWA", "warning")
+            sync_state.update_mapping(cwa_id, {
+                "last_modified": last_modified,
+                "last_synced_hash": state_hash,
+                "last_synced_at": datetime.now(timezone.utc).isoformat()
+            })
 
-                if config.get("auto_download") and status_id in (1, 2, 3):
-                    log(f"  → Triggering Shelfmark for '{title}' by {author_str or '?'}")
+        flush_hc_updates()
 
+        # 4. Handle Hardcover books not in CWA
+        log("Checking Hardcover books for missing downloads...")
+        for hc_book in all_hc_books:
+            hc_id = hc_book.get("book", {}).get("id")
+            if hc_id in processed_hc_ids: continue
+            
+            status_id = hc_book.get("status_id")
+            if status_id in (1, 2) and config.get("auto_download"):
+                title = hc_book["book"]["title"]
+                log(f"✗ '{title}' — missing in CWA. {prefix}Triggering Shelfmark...")
+                if not dry_run:
                     dl_result = trigger_shelfmark_search(
                         shelfmark_url=config["shelfmark_url"],
                         api_key=config.get("shelfmark_api_key", ""),
                         title=title,
-                        author=author_str,
-                        isbn13=isbn13,
+                        author=_extract_authors(hc_book["book"]["cached_contributors"])[0] if hc_book["book"]["cached_contributors"] else "",
+                        isbn13=_best_isbn13(hc_book["book"].get("editions", [])),
                         preferred_format=config.get("shelfmark_format", "epub"),
                         language=config.get("shelfmark_language", "en"),
                     )
+                    if dl_result.get("success"): result["books_downloaded"] += 1
+                    else: result["errors"] += 1
 
-                    book_entry["download_triggered"] = True
-                    book_entry["download_result"] = dl_result
-
-                    if dl_result.get("success"):
-                        result["books_downloaded"] += 1
-                        log(f"  ✓ {dl_result.get('message', 'Download requested')}")
-                    else:
-                        result["errors"] += 1
-                        log(f"  ✗ {dl_result.get('message', 'Unknown Shelfmark error')}", "error")
-
-                else:
-                    result["books_skipped"] += 1
-            else:
-                book_entry["download_triggered"] = False
-
-            sync_results.append(book_entry)
-
-        if kobo_books:
-            log("Syncing Kobo read books into CWA where missing…")
-            for kobo_book in kobo_books:
-                if not find_book_in_cwa(cwa_books, kobo_book["title"], kobo_book["authors"], kobo_book["isbn13"]):
-                    log(f"✗ Kobo read book '{kobo_book['title']}' is missing in CWA", "warning")
-                    if config.get("auto_download"):
-                        log(f"  → Triggering Shelfmark for Kobo book '{kobo_book['title']}'")
-                        dl_result = trigger_shelfmark_search(
-                            shelfmark_url=config["shelfmark_url"],
-                            api_key=config.get("shelfmark_api_key", ""),
-                            title=kobo_book["title"],
-                            author=(kobo_book["authors"][0] if kobo_book["authors"] else ""),
-                            isbn13=kobo_book["isbn13"],
-                            preferred_format=config.get("shelfmark_format", "epub"),
-                            language=config.get("shelfmark_language", "en"),
-                        )
-                        if dl_result.get("success"):
-                            result["books_downloaded"] += 1
-                            log(f"  ✓ {dl_result.get('message', 'Download requested')}")
-                        else:
-                            result["errors"] += 1
-                            log(f"  ✗ {dl_result.get('message', 'Unknown Shelfmark error')}", "error")
-                    else:
-                        result["books_skipped"] += 1
-
-        if kobo_books:
-            log("Syncing Kobo read books into Hardcover where missing…")
-            for kobo_book in kobo_books:
-                if not find_book_in_hc(hc_books, kobo_book["title"], kobo_book["authors"], kobo_book["isbn13"]):
-                    log(f"✗ Kobo read book '{kobo_book['title']}' is missing in Hardcover", "warning")
-                    search_res = search_hardcover_books(
-                        kobo_book["isbn13"] or kobo_book["title"],
-                        config["hardcover_token"],
-                        config["hardcover_api_url"]
-                    )
-                    if search_res:
-                        hc_id = search_res[0].get("id")
-                        if hc_id:
-                            log(f"  → Found on Hardcover, adding as Read")
-                            added = add_hardcover_book_status(
-                                book_id=hc_id,
-                                status_id=3,
-                                token=config["hardcover_token"],
-                                url=config["hardcover_api_url"]
-                            )
-                            if added:
-                                log(f"  ✓ Added '{kobo_book['title']}' to Hardcover")
-                                # Add a dummy entry so we don't re-add if it's also in CWA
-                                hc_books.append({"book": {"title": kobo_book["title"], "id": hc_id}, "status_id": 3})
-                            else:
-                                log(f"  ✗ Failed to add '{kobo_book['title']}' to Hardcover", "error")
-                                result["errors"] += 1
-                    else:
-                        log(f"  ✗ Could not find '{kobo_book['title']}' on Hardcover search", "warning")
-
-        log("Syncing CWA books into Hardcover where missing…")
-        for cwa_book in cwa_books:
-            if not find_book_in_hc(hc_books, cwa_book["title"], cwa_book["authors"], cwa_book["isbn13"]):
-                target_status = cwa_book.get("status_id", 0)
-                if target_status not in [1, 2, 3, 5]:
-                    target_status = 1  # Default to Want to Read if unknown
-                
-                log(f"✗ CWA book '{cwa_book['title']}' is missing in Hardcover", "warning")
-                search_res = search_hardcover_books(
-                    cwa_book["isbn13"] or cwa_book["title"],
-                    config["hardcover_token"],
-                    config["hardcover_api_url"]
-                )
-                if search_res:
-                    hc_id = search_res[0].get("id")
-                    if hc_id:
-                        log(f"  → Found on Hardcover, adding with status {HARDCOVER_STATUS_LABELS.get(target_status, target_status)}")
-                        added = add_hardcover_book_status(
-                            book_id=hc_id,
-                            status_id=target_status,
-                            token=config["hardcover_token"],
-                            url=config["hardcover_api_url"]
-                        )
-                        if added:
-                            log(f"  ✓ Added '{cwa_book['title']}' to Hardcover")
-                            hc_books.append({"book": {"title": cwa_book["title"], "id": hc_id}, "status_id": target_status})
-                        else:
-                            log(f"  ✗ Failed to add '{cwa_book['title']}' to Hardcover", "error")
-                            result["errors"] += 1
-                else:
-                    log(f"  ✗ Could not find '{cwa_book['title']}' on Hardcover search", "warning")
-
-        # 4. Fix missing series books
+        # 5. Optimized Series Sync
+        last_series_check_str = sync_state.get_general_state("last_series_check")
+        last_series_check = datetime.fromisoformat(last_series_check_str) if last_series_check_str else None
+        
         if config.get("auto_fix_series", True):
-            log("Checking for missing books in series…")
-            series_result = fix_missing_series_books(config["hardcover_token"], config["hardcover_api_url"])
-            log(f"Hardcover Series check: {series_result['checked_series']} series checked, {series_result['missing_books_added']} missing books added to Want To Read.")
-            
+            if not last_series_check or (datetime.now(timezone.utc) - last_series_check).total_seconds() > 24 * 3600:
+                log("Running daily series check…")
+                if not dry_run:
+                    series_result = fix_missing_series_books(config["hardcover_token"], config["hardcover_api_url"])
+                    log(f"Series sync: {series_result['missing_books_added']} books added.")
+                    sync_state.update_general_state("last_series_check", datetime.now(timezone.utc).isoformat())
+                else:
+                    log("[DRY] Would run daily series check")
+            else:
+                log("Skipping series check (last run < 24h ago)")
+
+        # 6. Kobo reading progress sync
+        if config.get("sync_reading_progress", True):
             try:
-                cwa_series_res = download_missing_cwa_series_books(cwa_books, config, log)
-                log(f"CWA Series check: {cwa_series_res['series_checked']} series checked, {cwa_series_res['books_downloaded']} missing books triggered for download.")
+                from cwa_kobo_sync import run_cwa_kobo_sync
+                log(f"{prefix}Syncing Kobo reading progress...")
+                run_cwa_kobo_sync(config, log_func=log, dry_run=dry_run)
             except Exception as e:
-                log(f"Error checking CWA series completion: {e}", "error")
+                log(f"Error during Kobo sync: {e}", "error")
 
-        # 4.5. Sync CWA Kobo Reading progress to Hardcover
-        try:
-            from cwa_kobo_sync import run_cwa_kobo_sync
-            log("Running CWA Kobo reading progress sync to Hardcover...")
-            run_cwa_kobo_sync(config, log_func=log)
-        except Exception as e:
-            log(f"Error during CWA Kobo sync: {e}", "error")
-
-
-        # 5. Update state
-        state["last_sync_books"] = sync_results
         result["finished_at"] = datetime.now(timezone.utc).isoformat()
         state["last_sync_result"] = result
         state["last_sync_end"] = datetime.now().isoformat()
-
-        log(
-            f"─── Sync complete: {result['books_checked']} checked, "
-            f"{result['books_in_cwa']} in CWA, "
-            f"{result['books_downloaded']} download(s) triggered, "
-            f"{result['books_skipped']} skipped, "
-            f"{result['errors']} error(s) ───"
-        )
-
-        return result
-
-    except KeyError as e:
-        result["errors"] += 1
-        result["finished_at"] = datetime.now(timezone.utc).isoformat()
-        state["last_sync_result"] = result
-        state["last_sync_end"] = datetime.now().isoformat()
-        log(f"Missing required config key: {e}", "error")
+        log(f"─── {prefix}Sync complete ───")
         return result
 
     except Exception as e:
@@ -1948,7 +1956,6 @@ def run_sync(config: dict, state: dict, emit_log=None) -> dict:
         state["last_sync_end"] = datetime.now().isoformat()
         log(f"Unhandled sync error: {e}", "error")
         return result
-
     finally:
         state["running"] = False
 
